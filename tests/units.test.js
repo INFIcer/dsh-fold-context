@@ -47,10 +47,12 @@ test('buildNote 带上编号与召回入口，且不超过上限', () => {
   assert.ok(note.length <= 200)
 })
 
-test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
+test('isKeeper 只放行用户原话（含调度指令）、重要消息与上一次摘要', () => {
   assert.equal(isKeeper(userNode(1, 'hi', 'user')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-pin')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-checkpoint')), true)
+  // 调度器投递的是用户指令，折掉它等于吞掉用户的要求。
+  assert.equal(isKeeper(userNode(1, 'hi', 'schedule')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'runtime-context')), false)
 })
 

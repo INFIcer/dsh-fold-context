@@ -216,7 +216,14 @@ window.__ModuleLoader__.load({
         h('button', {
           style: C.button,
           onClick: function () { setTick(function (value) { return value + 1 }) },
-        }, '刷新')
+        }, '刷新'),
+        // 逐轮报告是服务端现算的整页 HTML：新窗口打开，不打断对话。
+        h('a', {
+          style: Object.assign({}, C.button, { textDecoration: 'none', display: 'inline-block' }),
+          href: '/fold-report?session=' + encodeURIComponent(sessionId),
+          target: '_blank',
+          rel: 'noopener noreferrer',
+        }, '逐轮报告')
       )
 
       var errorLine = payload.status === 'error' && payload.error

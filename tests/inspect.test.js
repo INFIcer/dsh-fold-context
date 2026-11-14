@@ -188,7 +188,7 @@ test('显式的 pin.foldId 直接算固化，不吃归因推测', () => {
 test('buildHtmlReport 产出单文件中文报告，不引用外部资源', () => {
   const model = demoModel()
   const html = buildHtmlReport(model)
-  const labels = ['概览', '折叠后', '不折叠', '节省', '事件时间线', '按轮对比', '折叠段明细', '模型视角', '不折叠视角', '召回', '重要消息', '部署路径', '未固化']
+  const labels = ['概览', '折叠后', '不折叠', '节省', '事件时间线', '按轮对比', '折叠段明细', '逐轮历史', '折叠摘要', '用户原话', '召回', '重要消息', '部署路径', '未固化']
   for (const label of labels) {
     assert.ok(html.indexOf(label) >= 0, '缺少标签：' + label)
   }

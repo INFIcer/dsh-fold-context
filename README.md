@@ -64,14 +64,27 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 
 ## 可视化调试
 
-`fold_inspect` 把「模型真正看到的历史」与「不折叠时的历史」并排写成一份本地 HTML，用来核对折叠到底省了多少、哪几段被召回或固化：
+`fold_inspect` 生成一份单文件 HTML，主体是「逐轮历史」：每一大轮收起时只露用户原话与回复开头，展开就是这一轮的全部内容。用来核对折叠到底省了多少、哪几段被召回或固化：
 
 - 概览：折叠后/不折叠的字符与两档 token 估算、节省率、折叠段数、召回总次数、重要消息条数与占用字符。
 - 按轮对比与折叠段明细：每一步的折叠前/后字符、节省、被召回次数、是否已固化。
-- 事件时间线与逐条消息列表：按 `fold` / `recall` / `pin` 记录的 `at` 排序；两个视角各自可折叠。
-- 报告写在 `$DSH_HOME/fold-debug/<会话>.html`，同一会话重复生成会覆盖，零外部资源，不联网。
+- 事件时间线：按 `fold` / `recall` / `pin` 记录的 `at` 排序。
+- 逐轮历史：按用户消息切成一轮一块，默认收起；`summary` 上是轮次、折叠编号、已折叠/未折叠/插件生效前、步数与字数，以及用户与回复各一行预览。
+- 展开后按消息类型铺色块：用户原话（蓝）、上下文注入（灰，再套一层可展开）、检查点摘要（蓝灰，标注这就是模型实际看到的全部内容）、思考（琥珀）、工具调用（靛）、工具结果（橙）、回复（绿）、重要消息（紫）。折叠摘要在「折叠掉的原文」分隔线之后把原文摊开，方便对照。
+- 正文不裁剪：系统提示词、用户原话、长工具输出都完整渲染，超长的思考/调用/结果只加滚动框（工具栏「展开长文本」可去掉高度限制）。工具栏另有「展开全部」「收起全部」「只看已折叠的轮次」。
+
+系统提示词单独成块、不参与轮次编号也不折叠；插件装上之前的历史会标成「插件生效前·未折叠」。报告写在 `$DSH_HOME/fold-debug/<会话>.html`，同一会话重复生成会覆盖，零外部资源，不联网。
 
 不传 `sessionId` 就检查当前会话；找不到会话或原文载荷缺失时返回明确原因，不抛错。
+
+### 离线渲染
+
+宿主进程不在时也能出报告（脚本自己解 zstd 多帧日志、重放 surface）：
+
+```
+node tools/render-report.mjs <会话 id>
+node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --out report.html
+```
 
 ## 顶栏「折叠」页
 
@@ -84,7 +97,9 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 
 估算口径与宿主 token-meter 一致：每 4 字符算 1 token，每个文本块再加 4 token；页脚写明该口径。旧记录缺轮次或大小字段时按字面量估算，并在界面上标记。
 
-数据只来自 `fold-store` 的记录，不需要把会话拉起来；`/fold-stats` 只接受 `GET`/`HEAD`，缺 `session` 参数返回 400。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响。
+页头右侧的「逐轮报告」按钮新窗口打开 `GET /fold-report?session=<会话 id>`：服务端按当前历史现算同一份逐轮 HTML，不落盘、不用先调工具。会话已不在进程里时返回 404 并说明原因。
+
+数据只来自 `fold-store` 的记录，不需要把会话拉起来；`/fold-stats` 与 `/fold-report` 都只接受 `GET`/`HEAD`，缺 `session` 参数返回 400。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响。
 
 ## 已知限制
 
@@ -99,6 +114,9 @@ npm test              # node --test，跑 tests/ 下全部 *.test.js
 node tests/units.test.js
 node tests/host.test.js
 node tests/inspect.test.js
+node tests/turns.test.js
 node tests/stats.test.js
 node tests/web.test.js
 ```
+
+沙箱里 `node --test` 可能因 spawn 权限失败，直接按文件跑即可。
