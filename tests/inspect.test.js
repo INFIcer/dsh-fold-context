@@ -15,11 +15,7 @@ import {
   summarizeModelView,
   writeReport,
 } from '../lib/inspect.js'
-import { registerInspectTool } from '../lib/inspect-tool.js'
 import { estimateMessageTokens } from '../lib/tokens.js'
-import { makeCtx } from './fakes.js'
-
-const silent = { info() {}, warn() {}, error() {} }
 
 const NOTE_1 = '【已折叠历史】 第 1 轮已折叠，原文用 fold_recall("f1") 召回'
 const NOTE_2 = '【已折叠历史】 第 2 轮已折叠，原文用 fold_recall("f2") 召回'
@@ -325,89 +321,4 @@ test('collectRecords 从 store 读出 fold / pin / recall', () => {
   assert.equal(records.folds.size, 2)
   assert.equal(records.pins.length, 1)
   assert.equal(records.recalls.length, 1)
-})
-
-test('fold_inspect 工具生成报告文件，含召回与固化统计', async () => {
-  const homeDir = mkdtempSync(join(tmpdir(), 'fold-inspect-'))
-  const ctx = makeCtx()
-  const { messages, folds } = fixture()
-  const pins = [{ kind: 'pin', id: '部署路径', text: '在 E:\\dsh\\deploy.ps1', at: 3000 }]
-  const recalls = [{ kind: 'recall', id: 'f1', at: 1500 }]
-  const store = {
-    folds: () => folds,
-    pins: () => pins,
-    readAll: () => [...folds.values(), ...pins, ...recalls],
-    recallCount: (id) => recalls.filter((item) => item.id === id).length,
-  }
-  const session = { id: 'sess-tool', deriveMessages: () => messages }
-  const tool = registerInspectTool({
-    ctx,
-    resolveSession: () => session,
-    getStore: () => store,
-    getConfig: () => ({ enabled: true, minFoldChars: 1200 }),
-    homeDir,
-    log: silent,
-  })
-
-  const definition = ctx.registrations.find((item) => item.name === 'fold_inspect')
-  assert.ok(definition, '应当注册 fold_inspect')
-  const result = await definition.execute({}, {})
-  assert.equal(result.ok, true)
-  assert.ok(result.path.indexOf('fold-debug') >= 0)
-  assert.equal(existsSync(result.path), true)
-  assert.ok(result.text.indexOf('报告文件') >= 0)
-
-  const html = readFileSync(result.path, 'utf8')
-  assert.ok(html.indexOf('sess-tool') >= 0)
-  assert.ok(html.indexOf('已固化') >= 0)
-
-  tool.dispose()
-  assert.equal(ctx.registrations.length, 0)
-})
-
-test('fold_inspect 能按 sessionId 找会话，找不到时明确失败', async () => {
-  const homeDir = mkdtempSync(join(tmpdir(), 'fold-inspect-'))
-  const ctx = makeCtx()
-  const { messages, folds } = fixture()
-  const other = { id: 'sess-other', deriveMessages: () => messages }
-  ctx.get = (name) => {
-    if (name !== 'sessions') return null
-    return { get: (id) => (id === 'sess-other' ? other : undefined) }
-  }
-  const tool = registerInspectTool({
-    ctx,
-    resolveSession: () => undefined,
-    getStore: () => ({ folds: () => folds, pins: () => [], readAll: () => [...folds.values()] }),
-    getConfig: () => ({}),
-    homeDir,
-    log: silent,
-  })
-  const definition = ctx.registrations.find((item) => item.name === 'fold_inspect')
-  const found = await definition.execute({ sessionId: 'sess-other' }, {})
-  assert.equal(found.ok, true)
-  assert.ok(found.path.indexOf('sess-other') >= 0)
-
-  const missing = await definition.execute({ sessionId: 'nope' }, {})
-  assert.equal(missing.ok, false)
-  assert.ok(missing.text.indexOf('nope') >= 0)
-  tool.dispose()
-})
-
-test('工具执行异常时 fail-open 返回失败原因', async () => {
-  const homeDir = mkdtempSync(join(tmpdir(), 'fold-inspect-'))
-  const ctx = makeCtx()
-  const session = { id: 'sess-x', deriveMessages: () => { throw new Error('boom') } }
-  const tool = registerInspectTool({
-    ctx,
-    resolveSession: () => session,
-    getStore: () => ({ folds: () => new Map(), pins: () => [], readAll: () => [] }),
-    getConfig: () => ({}),
-    homeDir,
-    log: silent,
-  })
-  const definition = ctx.registrations.find((item) => item.name === 'fold_inspect')
-  const result = await definition.execute({}, {})
-  assert.equal(result.ok, false)
-  assert.ok(result.text.indexOf('boom') >= 0)
-  tool.dispose()
 })

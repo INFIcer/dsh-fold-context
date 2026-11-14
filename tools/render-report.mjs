@@ -1,4 +1,4 @@
-// 离线把一份会话日志渲染成 fold_inspect 的 HTML 报告。
+// 离线把一份会话日志渲染成逐轮报告的 HTML。
 // 用途：没有宿主进程（或宿主还跑着旧代码）时也能检查报告长什么样。
 // 用法：node tools/render-report.mjs <sessionId> [--home C:/Users/x/.dsh] [--out <file>]
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
