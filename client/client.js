@@ -531,6 +531,9 @@ window.__ModuleLoader__.load({
         h('span', { key: 'v', style: C.tag }, '第 ' + version + ' 版'),
         h('span', { key: 'nf', style: C.tag }, '不折叠'),
       ]
+      // 只有最后一条非空 system 是当前提示词；更早的版本留在历史里，模型仍会读到。
+      if (props.current === true) tags.push(h('span', { key: 'cur', style: C.tag }, '当前生效'))
+      else if (props.current === false) tags.push(h('span', { key: 'old', style: Object.assign({}, C.tag, { opacity: 0.7 }) }, '旧版 · 模型仍会读到'))
       if (version > 1) {
         tags.push(h('span', { key: 'd', style: C.tag }, diff ? (diff.same ? '与上一版一致' : '+' + diff.add + ' −' + diff.del) : '无差异数据'))
       }
@@ -571,10 +574,12 @@ window.__ModuleLoader__.load({
     // token 口径与宿主 token-meter 的基本档一致：4 字符 ≈ 1 token。
     // 两种视角：折叠后 = 模型现在看到的；不折叠 = 假设一次都没折过。
 
-    var COMPOSITION_KEYS = ['system', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
+    var COMPOSITION_KEYS = ['system', 'systemHistory', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
 
     var COMPOSITION_COLORS = {
       system: '#8b949e',
+      // 旧版提示词已经没用，颜色压暗一档，和当前生效的那版拉开。
+      systemHistory: '#64748b',
       user: '#3b82f6',
       assistant: '#34d399',
       tools: '#f59e0b',
@@ -835,7 +840,7 @@ window.__ModuleLoader__.load({
               h('div', { style: C.sectionTitle }, '上下文构成'),
               h('div', { style: C.sub }, '折叠后 ' + formatTokens(tokensOf(foldedTotal)) + ' token · 不折叠 ' + formatTokens(tokensOf(unfoldedTotal)) + ' · 省 ' + percent(saveRate))
             ),
-            h('div', { style: C.sub }, '按用途分类；两条同比例尺，长度差就是省下的量（图例：折叠后 / 不折叠）')
+            h('div', { style: C.sub }, '按用途分类；两条同比例尺，长度差就是省下的量（图例：折叠后 / 不折叠）。系统提示只算当前生效的那一版，旧版单列。')
           ),
           barLine('折叠后', folded, foldedTotal, barScale, 0),
           barLine('不折叠', unfolded, unfoldedTotal, barScale, unfoldedTotal > 0 ? foldedTotal / unfoldedTotal : 0),
@@ -863,7 +868,7 @@ window.__ModuleLoader__.load({
 
     function TurnCard(props) {
       var group = props.group || {}
-      if (group.kind === 'system') return h(SystemCard, { group: group, wide: props.wide })
+      if (group.kind === 'system') return h(SystemCard, { group: group, wide: props.wide, current: props.current })
       var opened = useLazyOpen()
       var label = typeof group.turn === 'number' ? '第 ' + group.turn + ' 轮' : '第 ' + (group.ordinal || 0) + ' 段'
       var tags = []
@@ -976,12 +981,18 @@ window.__ModuleLoader__.load({
         return h('div', { key: 'w' + index, style: { fontSize: '11px', opacity: 0.65, lineHeight: '17px' } }, '· ' + text)
       })
       var groups = Array.isArray(data.groups) ? data.groups : []
+      // 当前系统提示 = 最后一个非空 system 组；前面的版本只是留在历史里的旧副本。
+      var lastSystemIndex = -1
+      for (var gi = 0; gi < groups.length; gi += 1) {
+        var candidate = groups[gi]
+        if (candidate && candidate.kind === 'system' && candidate.chars > 0) lastSystemIndex = gi
+      }
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
         toolbar,
         notice,
         warns.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, warns) : null,
         groups.map(function (group, index) {
-          return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0] })
+          return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0], current: index === lastSystemIndex })
         })
       )
     }

@@ -56,6 +56,7 @@ test('折叠后视角把检查点算一类，不折叠视角换回原文的思�
   const result = buildComposition({ groups })
   const folded = result.totals.folded
   assert.equal(folded.system, 60)
+  assert.equal(folded.systemHistory, 0)
   assert.equal(folded.user, 10)
   assert.equal(folded.assistant, 150)
   assert.equal(folded.tools, 30)
@@ -89,9 +90,32 @@ test('逐块累计对齐总量，且每块带轮次标签', () => {
   assert.deepEqual(result.points[2].cumulative.folded, result.totals.folded)
 })
 
+test('系统提示只算最后一条非空的 system，旧版单列 systemHistory', () => {
+  const system = (chars) => entry({
+    role: 'system',
+    sourceKind: 'system',
+    chars,
+    blocks: chars > 0 ? [{ kind: 'text', text: 's'.repeat(chars) }] : [],
+  })
+  const groups = [
+    group({ ordinal: 1, kind: 'system', turn: null, version: 1, entries: [system(60)] }),
+    group({ ordinal: 2, kind: 'system', turn: null, version: 2, entries: [system(70)] }),
+    // 末尾的空 system 不改变「当前生效」的判断。
+    group({ ordinal: 3, kind: 'system', turn: null, version: 3, entries: [system(0)] }),
+  ]
+  const result = buildComposition({ groups })
+  assert.equal(result.totals.folded.system, 70)
+  assert.equal(result.totals.folded.systemHistory, 60)
+  assert.equal(result.totals.unfolded.system, 70)
+  assert.equal(result.totals.unfolded.systemHistory, 60)
+  assert.equal(result.totals.sum.folded, 130)
+  assert.equal(result.points[1].cumulative.folded.system, 70)
+  assert.equal(result.points[1].cumulative.folded.systemHistory, 60)
+})
+
 test('没有分组时给出完整分类与空总量', () => {
   const result = buildComposition({ groups: [] })
-  assert.equal(result.categories.length, 7)
+  assert.equal(result.categories.length, 8)
   assert.equal(result.points.length, 0)
   assert.deepEqual(result.totals.sum, { folded: 0, unfolded: 0 })
 })

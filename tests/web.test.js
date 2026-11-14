@@ -264,6 +264,7 @@ test('view 路由给出上下文构成：分类、折叠后与不折叠两套占
   const composition = body.composition
   assert.deepEqual(composition.categories.map((item) => item.key), [
     'system',
+    'systemHistory',
     'user',
     'assistant',
     'tools',

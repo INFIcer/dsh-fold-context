@@ -83,36 +83,36 @@ test('apply 注册对话顶栏 View 与插件页配置位', () => {
 })
 
 function demoComposition() {
-  const keys = ['system', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
-  const labels = ['系统提示', '用户原话', '思考与回复', '工具调用与结果', '上下文注入', '折叠摘要', '重要消息']
+  const keys = ['system', 'systemHistory', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
+  const labels = ['系统提示', '旧版系统提示', '用户原话', '思考与回复', '工具调用与结果', '上下文注入', '折叠摘要', '重要消息']
   const bucket = (values) => {
     const out = {}
     keys.forEach((key, index) => { out[key] = values[index] || 0 })
     return out
   }
-  const folded = bucket([90000, 500, 12000, 4000, 1000, 3000, 300])
-  const unfolded = bucket([90000, 500, 900000, 700000, 8000, 0, 300])
+  const folded = bucket([84381, 328999, 500, 12000, 4000, 1000, 3000, 300])
+  const unfolded = bucket([90000, 328999, 500, 900000, 700000, 8000, 0, 300])
   return {
     categories: keys.map((key, index) => ({ key, label: labels[index] })),
-    totals: { folded, unfolded, sum: { folded: 108800, unfolded: 1698800 } },
+    totals: { folded, unfolded, sum: { folded: 434180, unfolded: 2027799 } },
     points: [
       {
         ordinal: 1,
         kind: 'turn',
         turn: 1,
         label: 'T1',
-        folded: bucket([90000, 500, 12000, 4000, 1000, 3000, 0]),
-        unfolded: bucket([90000, 500, 900000, 700000, 8000, 0, 0]),
+        folded: bucket([84381, 0, 500, 12000, 4000, 1000, 3000, 0]),
+        unfolded: bucket([90000, 0, 500, 900000, 700000, 8000, 0, 0]),
         totals: { folded: 110500, unfolded: 1698500 },
-        cumulative: { folded: bucket([90000, 500, 12000, 4000, 1000, 3000, 0]), unfolded: bucket([90000, 500, 900000, 700000, 8000, 0, 0]) },
+        cumulative: { folded: bucket([84381, 0, 500, 12000, 4000, 1000, 3000, 0]), unfolded: bucket([90000, 0, 500, 900000, 700000, 8000, 0, 0]) },
       },
       {
         ordinal: 2,
         kind: 'turn',
         turn: 2,
         label: 'T2',
-        folded: bucket([0, 0, 300, 0, 0, 0, 300]),
-        unfolded: bucket([0, 0, 300, 0, 0, 0, 300]),
+        folded: bucket([0, 0, 0, 300, 0, 0, 0, 300]),
+        unfolded: bucket([0, 0, 0, 300, 0, 0, 0, 300]),
         totals: { folded: 600, unfolded: 600 },
         cumulative: { folded, unfolded },
       },
@@ -165,7 +165,7 @@ test('构成面板、图表与重要消息行能渲染（冒烟）', () => {
   const foldedWidth = parseFloat(foldedFill.props.style.width)
   const unfoldedWidth = parseFloat(unfoldedFill.props.style.width)
   assert.equal(unfoldedWidth, 100)
-  assert.ok(foldedWidth > 0 && foldedWidth < 10, '折叠后的条应明显短于不折叠：' + foldedWidth + '%')
+  assert.ok(foldedWidth > 0 && foldedWidth < unfoldedWidth / 2, '折叠后的条应明显短于不折叠：' + foldedWidth + '%')
   // 不折叠条上有一道竖线，标出折叠后保留到的位置
   assert.equal(unfoldedTrack.children.length, 2)
   assert.equal(unfoldedTrack.children[1].props.style.left, foldedWidth.toFixed(2) + '%')
