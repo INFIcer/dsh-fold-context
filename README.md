@@ -36,8 +36,7 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 | --- | --- | --- | --- |
 | `enabled` | `true` | 布尔 | 总开关，关掉只留工具与提示词 |
 | `minFoldChars` | `1200` | 200~200000 | 一轮里思考+工具输出+回复的字符数低于此值不折 |
-| `maxNoteChars` | `320` | 80~4000 | 检查点摘要的硬上限 |
-| `noteRatio` | `0.1` | 0.02~0.5 | 摘要按原文比例计算：`min(maxNoteChars, max(80, round(原文 * noteRatio)))` |
+| `maxNoteChars` | `320` | 80~4000 | 检查点里回复预览的长度上限（固定字数，不随原文比例变化）；思考与工具只留计数 |
 | `recallReminderAfter` | `3` | 1~50 | 同一段召回超过几次就提醒固化 |
 | `recallReminderText` | 内置文案 | ≤2000 字 | 固化提醒，支持 `{count}` 与 `{tool}`；空串表示不提醒 |
 | `recallDirectChars` | `8000` | 1000~200000 | 原文不超过这个字数就整段返回，超过则先返回分段目录 |
@@ -48,7 +47,7 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 | `maxPinTextChars` | `0` | 0~200000 | 单条重要消息的正文上限，`0` 表示不截断；设成正数只截断、不拒绝 |
 | `maxPins` | `0` | 0~100000 | 重要消息条数的软上限，`0` 表示不限制；超了照常发布，只提示 |
 | `pinBudgetChars` | `0` | 0~10000000 | 全部重要消息的字符软预算，`0` 表示不限制；超了照常发布，只提示 |
-| `systemPromptText` | 内置文案 | ≤20000 字 | 系统提示段，支持 `{{recallTool}}`、`{{pinTool}}`、`{{configTool}}`、`{{ratio}}`；空串表示不注入 |
+| `systemPromptText` | 内置文案 | ≤20000 字 | 系统提示段，支持 `{{recallTool}}`、`{{pinTool}}`、`{{configTool}}`；空串表示不注入 |
 | `promptOrder` | `300` | -1000~10000 | 系统提示段的排序值，越小越靠前 |
 | `foldToolOutputs` | `true` | 布尔 | `false` 时工具输出既不进摘要、也不进召回载荷，也不计入 `minFoldChars` 的体量 |
 | `maxFoldsPerTurn` | `8` | 1~32 | 一轮最多折成几段，超出的片段保留原文 |
@@ -63,7 +62,7 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 运行时用 `fold_config` 改配置：
 
 - `fold_config({ action: "get" })`：返回当前生效配置、配置文件路径与每项取值范围。
-- `fold_config({ action: "set", patch: { noteRatio: 0.2 } })`：只接受上表白名单键，逐项校验；通过后写文件并立即生效。非法键或越界值整批拒绝，不会出现「改了一半」。
+- `fold_config({ action: "set", patch: { maxNoteChars: 400 } })`：只接受上表白名单键，逐项校验；通过后写文件并立即生效。非法键或越界值整批拒绝，不会出现「改了一半」。
 - `fold_config({ action: "reset" })`：把全部字段显式写成默认值并落盘，覆盖 profile 里的同名配置。
 
 手工改 `fold-config.json` 也可以，但要重启 DSH 才生效；想让改动立刻起作用，用 `fold_config`。
