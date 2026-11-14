@@ -251,7 +251,7 @@ window.__ModuleLoader__.load({
           label: '重要消息成本',
           value: (pin > 0 ? '−' : '') + formatTokens(pin) + ' token',
           color: pin > 0 ? '#fbbf24' : 'inherit',
-          hint: totals.pins + ' 条固化，' + formatChars(totals.pinChars || 0) +
+          hint: totals.pins + ' 条固化，' + formatCharsTokens(totals.pinChars || 0) +
             (totals.pinsLost > 0 ? '；' + totals.pinsLost + ' 条已被压缩卷走（不再计入常驻）' : ''),
         },
         {
@@ -840,7 +840,7 @@ window.__ModuleLoader__.load({
       var meta = []
       if (entry.sourceLabel) meta.push(entry.sourceLabel)
       if (entry.seq !== null && entry.seq !== undefined) meta.push('#' + entry.seq)
-      meta.push(formatChars(entry.chars))
+      meta.push(formatCharsTokens(entry.chars))
       var record = entry.foldRecord
       var hasOriginal = entry.isCheckpoint && record && Array.isArray(record.items) && record.items.length > 0
       var summary = h('summary', { style: C.entrySummary },
