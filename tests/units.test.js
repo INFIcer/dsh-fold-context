@@ -194,21 +194,36 @@ test('TurnTracker 累加每步 provider 回报，snapshot 一并交出并清空'
   assert.equal(tracker.snapshot().usage.steps, 0)
 })
 
-test('publishPin 受条数与预算约束，成功时写成 fold-pin 消息', () => {
+test('publishPin 默认不设条数与长度上限，软上限只提示不拒绝', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
   const session = new FakeSession('sess-c')
   const store = new FoldStore({ homeDir, sessionId: session.id })
-  const config = normalizeConfig({ maxPins: 1, pinBudgetChars: 5000 })
+  const config = normalizeConfig({})
 
-  const first = publishPin({ session, label: '部署路径', text: '在 E:\\x', config, store, log: silent })
-  assert.equal(first.ok, true)
+  // 默认配置：十几条、单条六千字都照常发布，正文不截断。
+  const long = '长'.repeat(6000)
+  for (let i = 1; i <= 15; i += 1) {
+    const result = publishPin({ session, label: '结论' + i, text: i === 15 ? long : '短结论' + i, config, store, log: silent })
+    assert.equal(result.ok, true)
+    assert.equal(result.pins, i)
+  }
   const message = session.events.at(-1)
   assert.equal(message.data.source.kind, 'fold-pin')
   assert.ok(message.data.content[0].text.includes('【重要·永不折叠】'))
+  assert.ok(message.data.content[0].text.includes(long), '默认不截断正文')
 
-  const second = publishPin({ session, label: '再多一条', text: '内容', config, store, log: silent })
-  assert.equal(second.ok, false)
-  assert.ok(second.reason.includes('上限'))
+  // 显式设成软上限后仍然发布，只在返回里提示。
+  const soft = normalizeConfig({ maxPins: 2, pinBudgetChars: 10 })
+  const over = publishPin({ session, label: '再多一条', text: '内容', config: soft, store, log: silent })
+  assert.equal(over.ok, true)
+  assert.ok(over.note.includes('软上限'))
+  assert.ok(over.note.includes('软预算'))
+
+  // 显式设长度上限时只截断，不拒绝。
+  const clipped = publishPin({ session, label: '截断', text: '字'.repeat(50), config: normalizeConfig({ maxPinTextChars: 10 }), store, log: silent })
+  assert.equal(clipped.ok, true)
+  assert.ok(clipped.chars <= 11, '截断后是 10 字加省略号')
+  assert.ok(clipped.note.includes('截断'))
 })
 
 test('FoldStore 忽略半行、按会话隔离、能统计召回次数', () => {
@@ -268,7 +283,9 @@ test('recallItems 按预算截断', () => {
 test('normalizeConfig 把越界值钳进合法区间', () => {
   const config = normalizeConfig({ minFoldChars: 1, maxPins: 999 })
   assert.equal(config.minFoldChars, 200)
-  assert.equal(config.maxPins, 200)
+  assert.equal(config.maxPins, 999)
+  assert.equal(normalizeConfig({ maxPins: 1000000 }).maxPins, 100000)
+  assert.equal(normalizeConfig({ maxPinTextChars: -5 }).maxPinTextChars, 0)
   assert.equal(defaultConfig().enabled, true)
 })
 
@@ -538,7 +555,8 @@ test('fold_config 支持 get/set/reset，并拒绝非法键', async () => {
   const reset = await tool.execute({ action: 'reset' }, {})
   assert.equal(reset.ok, true)
   assert.equal(configStore.get().noteRatio, 0.1)
-  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).noteRatio, 0.1)
+  // 落盘只写与默认值不同的项，所以恢复默认后文件里不再有 noteRatio。
+  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).noteRatio, undefined)
 })
 
 test('statsOf 记下改过与读过的文件', () => {
