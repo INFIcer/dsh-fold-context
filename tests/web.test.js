@@ -87,6 +87,31 @@ test('读载荷抛错时仍然回 200 的空账本', () => {
   assert.equal(JSON.parse(res.state.body).totals.folds, 0)
 })
 
+test('stats 路由接受纯 uuid：自动换成 session- 前缀读账本', () => {
+  const records = [
+    { kind: 'fold', id: 'f1', turn: 1, at: 1, chars: 400, note: 'b'.repeat(40), items: [{ seq: 1, text: 'a'.repeat(400) }] },
+  ]
+  const handler = createStatsHandler({
+    makeStore: (id) => (id === 'session-u1' ? makeStore(records) : makeStore([])),
+    getConfig: () => ({}),
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq('/fold-stats?session=u1'), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.sessionId, 'session-u1')
+  assert.equal(body.totals.folds, 1)
+})
+
+test('stats 路由对不存在的会话回 404，而不是 200 全零', () => {
+  const handler = createStatsHandler({ makeStore: () => makeStore([]), getConfig: () => ({}), log: quietLog })
+  const res = fakeRes()
+  handler(fakeReq('/fold-stats?session=does-not-exist'), res)
+  assert.equal(res.state.status, 404)
+  assert.match(JSON.parse(res.state.body).error, /session-/)
+})
+
 test('registerStatsRoute 挂五条 exact 路由并随 dispose 撤销', () => {
   const routes = []
   const ctx = {
@@ -336,6 +361,25 @@ test('composition 路由缺参数 400、找不到会话 404、空历史给空构
   assert.equal(JSON.parse(empty.state.body).cost.totals.turns, 0)
 })
 
+test('composition 路由接受纯 uuid：解析时自动补 session- 前缀', () => {
+  const messages = [
+    { id: 's1', role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system' } },
+    ...demoMessages,
+  ]
+  const handler = createCompositionHandler({
+    resolveSessionById: (id) => (id === 'session-u9' ? fakeSession('session-u9', messages) : undefined),
+    makeStore: () => makeStore([]),
+    getConfig: () => ({}),
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq(compositionPath + '?session=u9'), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.sessionId, 'session-u9')
+  assert.ok(body.composition.totals.sum.folded > 0)
+})
+
 test('view 路由缺参数 400、找不到会话 404', () => {
   const handler = createViewHandler({ resolveSessionById: () => undefined, makeStore: () => makeStore([]), getConfig: () => ({}), log: quietLog })
   const missing = fakeRes()
@@ -442,7 +486,9 @@ test('/fold-* 只允许本机同源：非回环 Host、跨站 Origin、非 JSON 
   registerStatsRoute({
     ctx,
     log: quietLog,
-    makeStore: () => makeStore([]),
+    // 给 s1 一条账本：同源请求要落在 200 上；没有数据的 id 现在会明确 404。
+    makeStore: (id) =>
+      makeStore(id === 's1' ? [{ kind: 'fold', id: 'f1', turn: 1, at: 1, chars: 40, note: 'n', items: [{ seq: 1, text: 'x'.repeat(40) }] }] : []),
     getConfig: () => ({}),
     updateConfig: (patch) => patch,
   })

@@ -156,7 +156,7 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 
 页头右侧的「逐轮报告」按钮新窗口打开 `GET /fold-report?session=<会话 id>`：服务端按当前历史现算同一份逐轮 HTML，不落盘、不用先调工具。会话已不在进程里时返回 404 并说明原因。
 
-`/fold-stats` 只读 `fold-store` 的记录，不需要会话活着；`/fold-report`、`/fold-view` 与 `/fold-composition` 都要读 `session.deriveMessages()`，会话不在进程里就返回 404。这五个路由缺 `session` 参数返回 400，找不到会话返回 404；`/fold-config` 另接受 `POST`（`{patch}` 或 `{reset:true}`），其余路由只接受 `GET`/`HEAD`。所有 `/fold-*` 只接受本机同源请求：`Host` 必须是回环地址（防 DNS rebinding），`Origin` 存在时必须与 `Host` 一致（防跨站读取历史），`POST` 必须是 `application/json`（跨站简单请求带不了这个类型，从而挡掉 CSRF）。不满足返回 403。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响；宿主没有插件页（缺 `ui-plugin-manager`）时参数表单也无处渲染，`fold_config` 工具照旧可用。
+`/fold-stats` 只读 `fold-store` 的记录，不需要会话活着；`/fold-report`、`/fold-view` 与 `/fold-composition` 都要读 `session.deriveMessages()`，会话不在进程里就返回 404。会话 id 可以带 `session-` 前缀，也可以只传纯 uuid（服务端会自己补前缀，命中哪个形状就用哪个）。这五个路由缺 `session` 参数返回 400；找不到会话返回 404——`/fold-stats` 在「既没有账本、也解析不到会话」时同样返回 404，不再回 200 空账本；`/fold-config` 另接受 `POST`（`{patch}` 或 `{reset:true}`），其余路由只接受 `GET`/`HEAD`。所有 `/fold-*` 只接受本机同源请求：`Host` 必须是回环地址（防 DNS rebinding），`Origin` 存在时必须与 `Host` 一致（防跨站读取历史），`POST` 必须是 `application/json`（跨站简单请求带不了这个类型，从而挡掉 CSRF）。不满足返回 403。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响；宿主没有插件页（缺 `ui-plugin-manager`）时参数表单也无处渲染，`fold_config` 工具照旧可用。
 
 ## 和 billion-context 共用
 
