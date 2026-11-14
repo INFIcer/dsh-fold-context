@@ -36,12 +36,12 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 | --- | --- | --- | --- |
 | `enabled` | `true` | 布尔 | 总开关，关掉只留工具与提示词 |
 | `minFoldTokens` | `300` | 50~50000 | 一轮里思考+工具输出+回复的 token 估算量低于此值不折（字符数/4） |
-| `maxNoteTokens` | `80` | 20~1000 | 检查点里回复预览本身的 token 估算上限（与元信息无关）；回复不超上限时原样保留，超过才取开头+结尾 |
-| `recallReminderAfter` | `3` | 1~50 | 同一段召回超过几次就提醒固化 |
+| `maxNoteTokens` | `300` | 20~1000 | 检查点里回复预览本身的 token 估算上限（与元信息无关）；回复不超上限时原样保留，超过才取开头+结尾 |
+| `recallReminderAfter` | `1` | 1~50 | 同一段召回超过几次就提醒固化 |
 | `recallReminderText` | 内置文案 | ≤2000 字 | 固化提醒，支持 `{count}` 与 `{tool}`；空串表示不提醒 |
-| `recallDirectTokens` | `2000` | 250~50000 | 原文不超过这个 token 估算量就整段返回，超过则先返回分段目录 |
+| `recallDirectTokens` | `500` | 250~50000 | 原文不超过这个 token 估算量就整段返回，超过则先返回分段目录 |
 | `recallIndexPreviewTokens` | `25` | 5~125 | 分段目录里每段预览的 token 估算量 |
-| `maxRecallTokens` | `6000` | 250~50000 | 单次召回返回的原文 token 估算上限（也用作分段目录与检索结果的额度） |
+| `maxRecallTokens` | `1000` | 250~50000 | 单次召回返回的原文 token 估算上限（也用作分段目录与检索结果的额度） |
 | `searchPreviewTokens` | `15` | 5~75 | 关键词检索结果里每段命中片段保留的 token 估算量 |
 | `maxSearchFolds` | `8` | 1~50 | 关键词检索一次最多列几条折叠（更早的只给数量提示） |
 | `maxPinTextTokens` | `0` | 0~50000 | 单条重要消息的正文 token 估算上限，`0` 表示不截断；设成正数只截断、不拒绝 |
@@ -52,7 +52,7 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 | `foldToolOutputs` | `true` | 布尔 | `false` 时工具输出既不进摘要、也不进召回载荷，也不计入 `minFoldTokens` 的体量 |
 | `maxFoldsPerTurn` | `8` | 1~32 | 一轮最多折成几段，超出的片段保留原文 |
 | `maxStoreTokens` | `2000000` | 0~25000000 | 每个会话的 `fold-store` 载荷 token 估算上限，`0` 表示不限制；超了从最旧的折叠开始清理 |
-| `cacheHitRate` | `0.97` | 0~1 | 前缀缓存的真实命中率（DeepSeek 实测约 97%）。只在没有 provider 回报时兜底；有回报时成本模型改用实测值 |
+| `cacheHitRate` | `1` | 0~1 | 前缀缓存的真实命中率（DeepSeek 实测约 97%）。只在没有 provider 回报时兜底；有回报时成本模型改用实测值 |
 | `priceCacheHitInput` | `0.02` | 0~1000 | 缓存命中输入单价，元 / 百万 token（DeepSeek 空闲时段官方价，高峰是两倍） |
 | `priceInput` | `1` | 0~1000 | 输入（未命中缓存）单价，元 / 百万 token（同上） |
 | `priceOutput` | `4` | 0~1000 | 输出单价，元 / 百万 token（同上） |

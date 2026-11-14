@@ -365,7 +365,7 @@ test('单价字段有默认值，越界钳制，严格校验拒绝非数字', ()
   assert.equal(base.priceCacheHitInput, 0.02)
   assert.equal(base.priceInput, 1)
   assert.equal(base.priceOutput, 4)
-  assert.equal(base.cacheHitRate, 0.97)
+  assert.equal(base.cacheHitRate, 1)
 
   const clamped = normalizeConfig({ priceOutput: 9999, priceInput: -5 })
   assert.equal(clamped.priceOutput, 1000)
@@ -419,9 +419,9 @@ test('normalizeConfig 忽略未知键并回调 warn', () => {
 })
 
 test('noteChars 取固定上限，不随原文长短变化', () => {
-  assert.equal(noteChars(normalizeConfig({})), 80)
+  assert.equal(noteChars(normalizeConfig({})), 300)
   assert.equal(noteChars(normalizeConfig({ maxNoteTokens: 900 })), 900)
-  assert.equal(noteChars({}), 80)
+  assert.equal(noteChars({}), 300)
 })
 
 test('buildNote 的长度上限只约束回复行，元信息不被截断', () => {
@@ -606,7 +606,7 @@ test('fold_config 支持 get/set/reset，并拒绝非法键', async () => {
   assert.equal(got.ok, true)
   assert.ok(got.text.includes('maxNoteTokens'))
   assert.ok(got.text.includes('20~1000'))
-  assert.equal(got.config.maxNoteTokens, 80)
+  assert.equal(got.config.maxNoteTokens, 300)
   assert.equal(got.filePath, join(homeDir, 'fold-config.json'))
 
   const set = await tool.execute({ action: 'set', patch: { maxNoteTokens: 400 } }, {})
@@ -627,9 +627,9 @@ test('fold_config 支持 get/set/reset，并拒绝非法键', async () => {
 
   const reset = await tool.execute({ action: 'reset' }, {})
   assert.equal(reset.ok, true)
-  assert.equal(configStore.get().maxNoteTokens, 80)
+  assert.equal(configStore.get().maxNoteTokens, 300)
   // reset 把默认值显式写进文件层，所以 maxNoteTokens 是 320 而不是「键消失」。
-  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).maxNoteTokens, 80)
+  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).maxNoteTokens, 300)
 })
 
 test('statsOf 记下改过与读过的文件', () => {

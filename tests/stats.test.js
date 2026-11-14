@@ -97,7 +97,7 @@ test('没有记录时给空账本而不是报错', () => {
   })
   // 空账本也要给出单价，页面不必自己兜底。
   assert.equal(stats.pricing.prices.input, 1)
-  assert.equal(stats.pricing.cacheHitRate, 0.97)
+  assert.equal(stats.pricing.cacheHitRate, 1)
 })
 
 // 金额曾经用「命中率加权均价」把两种方向相反的量压成一个价，下面几条把它钉住。

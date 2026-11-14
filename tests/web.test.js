@@ -477,7 +477,7 @@ test('config 路由 POST reset 用默认值覆盖', async () => {
   assert.equal(res.state.status, 200)
   const body = JSON.parse(res.state.body)
   assert.equal(body.config.minFoldTokens, 300)
-  assert.equal(body.config.recallDirectTokens, 2000)
+  assert.equal(body.config.recallDirectTokens, 500)
 })
 
 test('/fold-* 只允许本机同源：非回环 Host、跨站 Origin、非 JSON POST 都 403', async () => {
