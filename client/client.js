@@ -941,10 +941,10 @@ window.__ModuleLoader__.load({
       }
       if (data.empty) return h('div', {}, toolbar, h('div', { style: C.notice }, '这个会话还没有派生消息（历史为空）。'))
       var totals = data.totals || {}
-      var tokens = totals.tokens || {}
+      var tokens = typeof totals.tokens === 'number' ? totals.tokens : 0
       var notice = h('div', { style: C.notice },
         '模型看到 ' + (totals.messages || 0) + ' 条消息、' + formatChars(totals.chars) + '，约 ' +
-        formatTokens(tokens.low) + '–' + formatTokens(tokens.high) + ' token；折叠检查点 ' + (totals.checkpoints || 0) +
+        formatTokens(tokens) + ' token（4 字符/token，按块 +4）；折叠检查点 ' + (totals.checkpoints || 0) +
         ' 条、重要消息 ' + (totals.pins || 0) + ' 条；相比不折叠省 ' + formatChars(totals.savedChars) +
         '（' + percent(totals.saveRate) + '）。'
       )

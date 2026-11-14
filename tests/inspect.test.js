@@ -16,6 +16,7 @@ import {
   writeReport,
 } from '../lib/inspect.js'
 import { registerInspectTool } from '../lib/inspect-tool.js'
+import { estimateMessageTokens } from '../lib/tokens.js'
 import { makeCtx } from './fakes.js'
 
 const silent = { info() {}, warn() {}, error() {} }
@@ -80,7 +81,7 @@ function demoModel() {
   })
 }
 
-test('summarizeModelView 统计角色、检查点、pin 与两档 token', () => {
+test('summarizeModelView 统计角色、检查点、pin 与 token', () => {
   const { messages, folds } = fixture()
   const view = summarizeModelView({ derivedMessages: messages, folds })
   assert.equal(view.totals.count, messages.length)
@@ -89,8 +90,8 @@ test('summarizeModelView 统计角色、检查点、pin 与两档 token', () => 
 
   const chars = view.messages.reduce((sum, item) => sum + item.chars, 0)
   assert.equal(view.totals.chars, chars)
-  assert.equal(view.totals.tokens.low, Math.round(chars / 3.2))
-  assert.equal(view.totals.tokens.high, Math.round(chars / 1.6))
+  assert.equal(view.totals.tokens, messages.reduce((sum, item) => sum + estimateMessageTokens(item), 0))
+  assert.equal(view.messages[0].tokens, estimateMessageTokens(messages[0]))
 
   assert.equal(view.messages[0].role, 'user')
   assert.equal(view.messages[0].roleLabel, '用户')
@@ -107,14 +108,20 @@ test('summarizeModelView 统计角色、检查点、pin 与两档 token', () => 
   assert.ok(pin.preview.indexOf('部署路径') >= 0)
 })
 
-test('summarizeModelView 支持注入 estimateTokens', () => {
-  const { messages } = fixture()
-  const view = summarizeModelView({ derivedMessages: messages, estimateTokens: (text) => text.length / 2 })
-  assert.equal(view.totals.tokens.custom, Math.round(view.totals.chars / 2))
-  // 注入失败时退回两档估算，不抛错。
-  const broken = summarizeModelView({ derivedMessages: messages, estimateTokens: () => { throw new Error('boom') } })
-  assert.equal(broken.totals.tokens.custom, undefined)
-  assert.equal(broken.totals.tokens.high, Math.round(broken.totals.chars / 1.6))
+test('token 按内容块计价：思考、回复、工具调用参数分开算', () => {
+  const messages = [{
+    role: 'assistant',
+    content: [
+      { type: 'reasoning', text: '思'.repeat(400) },
+      { type: 'text', text: '答'.repeat(40) },
+      { type: 'tool-call', id: 'c1', name: 'run_code', arguments: '{"code":"x"}' },
+    ],
+  }]
+  const view = summarizeModelView({ derivedMessages: messages })
+  // 思考 400/4+4、回复 40/4+4、调用 8/4 + 12/4 + 4、消息再 +4。
+  assert.equal(view.totals.tokens, 104 + 14 + 9 + 4)
+  // 空消息不占上下文。
+  assert.equal(summarizeModelView({ derivedMessages: [{ role: 'assistant', content: [] }] }).totals.tokens, 0)
 })
 
 test('reconstructUnfolded 用 fold 原文还原检查点，字符增长且按轮算出节省', () => {
