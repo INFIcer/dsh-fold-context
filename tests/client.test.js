@@ -372,7 +372,9 @@ test('折叠原文面板与召回同形：整段/目录两种形态与目录行�
 
   const lines = t.recallIndexLines(parts, 10)
   assert.ok(lines[0].startsWith('#1 [思考] '))
-  assert.ok(lines[0].includes('字：'))
+  // 目录行同时给字数与 token：字数在 formatCharsTokens 里带「字」，token 以（≈N token）结尾。
+  assert.ok(lines[0].includes('字（≈'))
+  assert.ok(lines[0].includes(' token）：'))
   assert.ok(lines[1].startsWith('#2 [调用 read] '))
   assert.ok(lines[0].length < 60)
 })

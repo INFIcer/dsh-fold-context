@@ -32,6 +32,13 @@ window.__ModuleLoader__.load({
       return Math.round(n) + ' 字'
     }
 
+    // 字数与 token 一起给：4 字符 ≈ 1 token，与宿主 token-meter 的基本档一致。
+    var CHARS_PER_TOKEN = 4
+    function formatCharsTokens(value) {
+      var chars = typeof value === 'number' && isFinite(value) ? value : 0
+      return formatChars(chars) + '（≈' + formatTokens(Math.round(chars / CHARS_PER_TOKEN)) + ' token）'
+    }
+
     // 金额一律按人民币显示：大于 1 元给到分，小的给到 4 位，再小就写成「<¥0.0001」。
     function formatMoney(value) {
       var n = typeof value === 'number' && isFinite(value) ? value : 0
@@ -715,7 +722,7 @@ window.__ModuleLoader__.load({
       var label = BLOCK_LABELS[kind] || '文本'
       if (kind === 'call' && block.name) label += ' ' + block.name
       return h('div', { style: Object.assign({}, tint(kind), C.blockBox) },
-        h('div', { style: C.blockHead }, label + ' · ' + text.length + ' 字'),
+        h('div', { style: C.blockHead }, label + ' · ' + formatCharsTokens(text.length)),
         h('div', { style: Object.assign({}, C.blockText, props.wide ? C.blockWide : C.blockClip) }, text || '（空）')
       )
     }
@@ -731,7 +738,10 @@ window.__ModuleLoader__.load({
       var item = props.item || {}
       var opened = useLazyOpen()
       var seq = item.seq === null || item.seq === undefined ? '?' : item.seq
-      var head = '第 ' + props.index + ' 段 · #' + seq + ' · ' + formatChars(item.chars) + ' · ≈' + formatTokens(Math.round((item.chars || 0) / 4)) + ' token'
+      var blocks = Array.isArray(item.blocks) ? item.blocks : []
+      var kindPart = blocks[0] || {}
+      var kindLabel = recallKindLabel({ kind: kindPart.kind || 'text', name: kindPart.name || '' })
+      var head = '第 ' + props.index + ' 段 · #' + seq + ' · [' + kindLabel + '] · ' + formatCharsTokens(item.chars)
       return h('details', { style: C.itemBox, onToggle: opened[1] },
         h('summary', { style: C.itemSummary }, head),
         opened[0] ? h('div', { style: C.itemBody }, h(BlockList, { blocks: item.blocks, wide: props.wide })) : null
@@ -764,7 +774,7 @@ window.__ModuleLoader__.load({
       return parts.map(function (part) {
         var flat = part.text.replace(/^\[[^\]]*\]\s*/, '').replace(/\s+/g, ' ').trim()
         var cut = flat.length <= previewChars ? flat : flat.slice(0, Math.max(0, previewChars)) + '…'
-        return '#' + part.no + ' [' + recallKindLabel(part) + '] ' + formatChars(part.chars) + ' 字：' + (cut || '（空）')
+        return '#' + part.no + ' [' + recallKindLabel(part) + '] ' + formatCharsTokens(part.chars) + '：' + (cut || '（空）')
       })
     }
 
@@ -793,20 +803,15 @@ window.__ModuleLoader__.load({
       var record = props.record || {}
       var plan = recallPlan(record, props.config)
       var opened = useLazyOpen()
-      var head = '折叠掉的原文 · ' + plan.parts.length + ' 段 · 约 ' + formatTokens(plan.tokens) + ' token（' +
-        (plan.direct ? '召回时整段返回' : '召回时先给目录') + '，模型看不到）'
-      var note = plan.direct
-        ? '调用 fold_recall 时整段返回，下面就是模型能取回的原文；不需要再选段。'
-        : '原文超过直接返回上限（' + formatTokens(plan.directLimit) + ' token），召回先返回下面的分段目录，选 parts 才取回选中的段。'
-      var children = [h('div', { key: 'note', style: C.sub }, note)]
+      var head = '折叠掉的原文 · ' + plan.parts.length + ' 段 · 约 ' + formatChars(plan.chars) + '（≈' + formatTokens(plan.tokens) + ' token）' +
+        '（' + (plan.direct ? '召回时整段返回' : '召回时先给目录') + '，模型看不到）'
+      // 不再单列说明段：目录行本身就带段号/类型/字数/token/预览，整段模式靠每段头部标注。
+      var children = []
       if (!plan.direct) {
         var lines = recallIndexLines(plan.parts, plan.previewChars)
         for (var li = 0; li < lines.length; li += 1) {
           children.push(h('div', { key: 'idx' + li, style: RECALL_LINE_STYLE }, lines[li]))
         }
-        children.push(h('div', { key: 'hint', style: C.sub }, '这些是召回时模型看到的目录行；点开下方任一段可对照原文。'))
-      } else {
-        children.push(h('div', { key: 'hint', style: C.sub }, '整段返回时模型看到的就是下方全部内容。'))
       }
       for (var pi = 0; pi < plan.parts.length; pi += 1) {
         var part = plan.parts[pi]
@@ -907,7 +912,7 @@ window.__ModuleLoader__.load({
         h('div', { style: C.turnHead },
           h('span', { style: C.turnNo }, '系统提示词'),
           tags,
-          h('span', { style: C.turnMeta }, formatChars(group.chars) + ' 字 · ' + (group.entries || []).length + ' 条')
+          h('span', { style: C.turnMeta }, formatCharsTokens(group.chars) + ' · ' + (group.entries || []).length + ' 条')
         ),
         h('div', { style: C.peek },
           h('span', { style: C.peekKey }, '内容'),
@@ -1252,7 +1257,7 @@ window.__ModuleLoader__.load({
       for (var pi = 0; pi < pinLabels.length; pi += 1) {
         tags.push(h('span', { key: 'pin' + pi, style: Object.assign({}, C.tag, { color: '#8250df', borderColor: 'rgba(130,80,223,.45)' }) }, '重要消息·' + pinLabels[pi]))
       }
-      var meta = (group.steps || 0) + ' 步 · ' + formatChars(group.chars) + (group.folded ? ' ← 原文 ' + formatChars(group.unfoldedChars) : '')
+      var meta = (group.steps || 0) + ' 步 · ' + formatCharsTokens(group.chars) + (group.folded ? ' ← 原文 ' + formatCharsTokens(group.unfoldedChars) : '')
       var summary = h('summary', { style: C.turnSummary },
         h('div', { style: C.turnHead },
           h('span', { style: C.turnNo }, label),
