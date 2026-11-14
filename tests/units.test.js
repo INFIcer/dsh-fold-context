@@ -224,6 +224,41 @@ test('FoldStore 忽略半行、按会话隔离、能统计召回次数', () => {
   assert.equal(store.readAll().length, 3)
 })
 
+test('注入消息撑满预算时，载荷仍然保住最终回复', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const session = new FakeSession('sess-c')
+  const nodes = [userNode(1, '帮我查一下', 'user')]
+  let seq = 2
+  // 20 步：每步有思考、工具结果，再加一条 3 千字的运行时注入。
+  for (let i = 0; i < 20; i += 1) {
+    nodes.push(userNode(seq, '注入'.repeat(1500), 'runtime-context'))
+    seq += 1
+    nodes.push(assistantNode(seq, { reasoning: '想'.repeat(400), calls: [{ id: 'c' + i, name: 'run_code' }] }))
+    seq += 1
+    nodes.push(toolNode(seq, 'c' + i, '果'.repeat(600)))
+    seq += 1
+  }
+  nodes.push(assistantNode(seq, { reasoning: '收尾'.repeat(50), text: '本轮结论：载荷必须保住这句话。' }))
+  const last = nodes[nodes.length - 1]
+  session.seed(nodes)
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+
+  const result = foldTurn({
+    session,
+    turn: 1,
+    nodes,
+    config: normalizeConfig({ minFoldChars: 1200 }),
+    store,
+    log: silent,
+  })
+  assert.deepEqual(result.ids, ['f1'])
+  const record = store.findFold('f1')
+  // 注入消息与调用参数不计入 chars，载荷必须完整覆盖整段，所以载荷比 chars 长。
+  assert.ok(record.chars < record.items.reduce((sum, item) => sum + item.text.length, 0))
+  assert.ok(record.items.some((item) => item.text.includes('[回复] 本轮结论')))
+  assert.equal(record.items.at(-1).seq, last.seq)
+})
+
 test('recallItems 按预算截断', () => {
   const items = recallItems([assistantNode(1, { text: 'x'.repeat(500) })], 100)
   assert.equal(items.length, 1)

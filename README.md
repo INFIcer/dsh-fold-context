@@ -9,7 +9,7 @@
 1. 轮结束（`agent/turn-stopping`）时，把本轮从第一条非保留消息到最后一个节点的区间整体替换成一条 `user/message` 检查点消息。
 2. 不折：只有真正的用户原话、`fold_pin` 重要消息、上一次的检查点本身；单轮内容少于 `minFoldChars` 也不折。运行时上下文注入（`<system-reminder>`）、调度提醒都算上下文，跟思考与工具输出一起折掉——折掉的内容下一轮会重新注入最新的一份，要旧的就 `fold_recall`。
 3. 检查点正文写清折叠了几步、几次工具调用、工具名、回复的开头与结尾，并给出 `fold_recall("f7")` 这类编号；另有一行「· 文件：改过 …；读过 …」记下这一轮碰过哪些文件——改过的要重读，只读过的不必整份重读。
-4. 召回是分级的：`fold_recall("f7")` 在原文不超过 `recallDirectChars` 字时直接给全文；更长的先返回分段目录（段号、类型、字数、开头），模型再用 `fold_recall("f7", parts: ["1", "4-6"])` 或 `parts: ["think"]` / `["tools"]` 多选取回。内容召回会累计次数，超过 `recallReminderAfter` 时要求模型用 `fold_pin` 固化结论；只查目录不算。
+4. 召回是分级的：`fold_recall("f7")` 在原文不超过 `recallDirectChars` 字时直接给全文；更长的先返回分段目录（段号、类型、字数、开头），模型再用 `fold_recall("f7", parts: ["1", "4-6"])` 或 `parts: ["think"]` / `["tools"]` 多选取回。内容召回会累计次数，超过 `recallReminderAfter` 时要求模型用 `fold_pin` 固化结论；只查目录不算。载荷在折叠时就保存整段原文（含最终回复），召回限流只发生在返回时。
 5. 只记得关键词时用检索：`fold_recall({query: "lib/web.js"})` 扫全部折叠原文，只回折叠编号、段号与命中片段，不返回原文，也不计召回次数；拿到编号后再 `fold_recall({id: "f5", parts: ["2","4"]})` 取原文。`id` 与 `query` 同时给时，只在这条折叠里筛段。
 6. `fold_pin` 追加一条 `【重要·永不折叠】` 消息，永不被折叠。
 7. 系统提示词追加一段 `fold-compression`，说明机制与三个工具（`fold_recall`、`fold_pin`、`fold_config`）的用法。
