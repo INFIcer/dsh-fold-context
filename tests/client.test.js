@@ -171,6 +171,38 @@ test('构成面板、图表与重要消息行能渲染（冒烟）', () => {
   assert.equal(unfoldedTrack.children[1].props.style.left, foldedWidth.toFixed(2) + '%')
 })
 
+test('成本提示只拿「归折叠管的部分」跟实测比，并点明两笔额外开销', () => {
+  const { module } = loadClient()
+  const noteFor = module.__test.costDriftNote
+  assert.equal(typeof noteFor, 'function')
+  // 真实形态：折叠后总计 269k（含插件生效前那一轮 222k），实测 62k。
+  // 提示若拿总计去比，会得出「实测只有估算的 23%」这种误导结论。
+  const note = noteFor({
+    estimateTokens: 268943,
+    actualPromptTokens: 62390,
+    legacyTokens: 221973,
+    eraTokens: 46970,
+    governedTokens: 46970,
+    externalTokens: 15420,
+    ratio: 0.2319,
+    governedRatio: 1.3282,
+    overEstimate: true,
+    underEstimate: false,
+  })
+  assert.ok(note.includes('本插件覆盖的历史约 47.0k token'), note)
+  assert.ok(note.includes('实测最近一次请求 62.4k token'), note)
+  assert.equal(note.includes('269.0k'), false, '不能用折叠后总计去跟实测比：' + note)
+  assert.ok(note.includes('插件生效前那一轮约 222.0k token'), note)
+  assert.ok(note.includes('约 15.4k token 是历史之外的开销'), note)
+  assert.ok(note.includes('133%'), note)
+  // 实测更大时给的是「差额在历史之外」，不是「估算偏高」
+  const under = noteFor({ governedTokens: 1000, actualPromptTokens: 4000, externalTokens: 3000, governedRatio: 4, underEstimate: true })
+  assert.ok(under.includes('实测比本插件覆盖的部分大'), under)
+  assert.ok(under.includes('差额来自历史之外的开销'), under)
+  // 还没有 provider 回报时说明原因，不编数字
+  assert.ok(noteFor(null).includes('要等本轮有一次模型调用'))
+})
+
 test('参数表单只挂在插件页，折叠 tab 不再有设置入口', () => {
   const source = readFileSync(clientFile, 'utf8')
   assert.ok(source.includes("['ledger', '账本']"))

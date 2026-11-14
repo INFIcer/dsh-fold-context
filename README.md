@@ -161,6 +161,7 @@ node tests/web.test.js
 node tests/recall.test.js
 node tests/cost.test.js
 node tests/composition.test.js
+node tests/diff.test.js
 node tests/client.test.js
 ```
 

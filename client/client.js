@@ -255,6 +255,29 @@ window.__ModuleLoader__.load({
     // 每轮请求开销：把每一轮「折叠后」与「不折叠」各重放一遍算出来的 token 账。
     // 估算不等于账单，但两者的差能说明折叠到底省在哪：省下的量随轮数累积，
     // 检查点本身每轮只付一次未命中的钱。
+    // 估算与实测的口径差：只有「归折叠管的那部分」能跟 provider 回报并排比。
+    // 把三段拆开写，避免把插件生效前那一轮与工具定义算成本插件的偏差。
+    function costDriftNote(drift) {
+      if (!drift) return '实际输入要等本轮有一次模型调用后才会出现。'
+      var governed = drift.governedTokens || 0
+      var text = '本插件覆盖的历史约 ' + formatTokens(governed) + ' token'
+      if (drift.legacyTokens > 0) {
+        text += '（另有插件生效前那一轮约 ' + formatTokens(drift.legacyTokens) + ' token 从未被折叠，实测里已被请求期压缩器改写，不计入这个口径）'
+      }
+      text += '；provider 实测最近一次请求 ' + formatTokens(drift.actualPromptTokens) + ' token'
+      if (drift.externalTokens > 0) {
+        text += '，其中约 ' + formatTokens(drift.externalTokens) + ' token 是历史之外的开销（工具定义、请求期压缩器注入的摘要）'
+      }
+      text += '。'
+      if (drift.underEstimate) {
+        return text + '实测比本插件覆盖的部分大，差额来自历史之外的开销；折叠省下的量仍按同一套重放口径算。'
+      }
+      if (drift.governedRatio) {
+        return text + '实测约为本插件覆盖部分的 ' + Math.round(drift.governedRatio * 100) + '%。'
+      }
+      return text
+    }
+
     function CostSection(props) {
       var cost = props.cost || {}
       var totals = cost.totals || {}
@@ -267,19 +290,7 @@ window.__ModuleLoader__.load({
         h(Kpi, { label: '净节省', value: (saved >= 0 ? '+' : '') + formatTokens(saved), color: saved >= 0 ? '#34d399' : '#f87171', hint: '省 ' + percent(totals.savedRate || 0) + '；缓存命中按 ' + Math.round((cost.hitRatio || 0) * 100) + '% 计价' }),
         h(Kpi, { label: '实际输入', value: latest ? formatTokens(latest.promptTokens) : '—', color: '#60a5fa', hint: latest ? '最近一次请求；有回报的 ' + (totals.actualTurns || 0) + ' 轮累计 ' + formatTokens(totals.actualPromptTokens || 0) : '本进程还没有拿到 provider 回报' })
       )
-      var drift = cost.drift || null
-      var governed = drift ? (drift.governedTokens || 0) : 0
-      var note = drift
-        ? '本插件覆盖的历史约 ' + formatTokens(governed) + ' token' +
-          (drift.legacyTokens > 0 ? '（另有插件生效前那一轮约 ' + formatTokens(drift.legacyTokens) + ' token 从未被折叠，实测里已被请求期压缩器改写，不计入这个口径）' : '') +
-          '；provider 实测最近一次请求 ' + formatTokens(drift.actualPromptTokens) + ' token' +
-          (drift.externalTokens > 0 ? '，其中约 ' + formatTokens(drift.externalTokens) + ' token 是历史之外的开销（工具定义、请求期压缩器注入的摘要）' : '') + '。' +
-          (drift.underEstimate
-            ? '实测比本插件覆盖的部分大，差额来自历史之外的开销；折叠省下的量仍按同一套重放口径算。'
-            : drift.governedRatio
-              ? '实测约为本插件覆盖部分的 ' + Math.round(drift.governedRatio * 100) + '%。'
-              : '')
-        : '实际输入要等本轮有一次模型调用后才会出现。'
+      var note = costDriftNote(cost.drift)
       var body = rows.length === 0
         ? h('div', { style: C.notice }, '还没有可估算的轮次。')
         : h('div', { style: { maxHeight: '280px', overflowY: 'auto' } },
@@ -1293,6 +1304,7 @@ window.__ModuleLoader__.load({
       CompositionChart: CompositionChart,
       TurnCard: TurnCard,
       entryKindOf: entryKindOf,
+      costDriftNote: costDriftNote,
     }
     return module.exports
   },
