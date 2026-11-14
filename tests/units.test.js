@@ -71,7 +71,7 @@ test('maxNoteTokens 调大后预览随之变长，且不重复展示', () => {
   const small = buildNote({ foldId: 'f9', turn: 9, stats, maxTokens: 20, toolName: 'fold_recall' })
   const large = buildNote({ foldId: 'f9', turn: 9, stats, maxTokens: 150, toolName: 'fold_recall' })
   const preview = (note) => {
-    const m = note.match(/· 回复约 500 字：([\s\S]*)$/)
+    const m = note.match(/· 回复约 500 字(?:（≈\d+ token）)?：([\s\S]*)$/)
     if (m) return m[1]
     const mm = note.match(/开头「([^」]*)…」，结尾「…([^」]*)」/)
     return mm ? mm[1] + mm[2] : ''
@@ -434,7 +434,7 @@ test('buildNote 的长度上限只约束回复行，元信息不被截断', () =
   const long = buildNote({ foldId: 'f3', turn: 3, stats, maxTokens: 30, toolName: 'fold_recall' })
   assert.ok(long.includes('【已折叠历史】 第 3 轮'), long)
   assert.ok(long.includes('· 文件：读过 lib/web.js'), long)
-  const match = long.match(/· 回复约 4000 字，开头「([^」]*)…」，结尾「…([^」]*)」/)
+  const match = long.match(/· 回复约 4000 字(?:（≈\d+ token）)?，开头「([^」]*)…」，结尾「…([^」]*)」/)
   assert.ok(match, long)
   // 预览文字本身不超过上限；元信息（编号/文件行）在它之外，不被挤掉。
   assert.ok(match[1].length + match[2].length <= 120, long)

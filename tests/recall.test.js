@@ -132,7 +132,7 @@ test('kindChoices 只列真的存在的类型，没有回复段就不提 reply',
 
 test('describeFold 保留整段返回的旧格式', () => {
   const text = describeFold(record())
-  assert.match(text, /^折叠 f1（第 2 轮，原文约 900 字）/)
+  assert.match(text, /^折叠 f1（第 2 轮，原文约 900 字，≈225 token）/)
   assert.match(text, /--- #11 ---/)
   assert.match(text, /\[回复\] 开始搬/)
 })
