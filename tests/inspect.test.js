@@ -141,6 +141,65 @@ test('reconstructUnfolded 用 fold 原文还原检查点，字符增长且按轮
   assert.equal(row.foldedChars, NOTE_1.length)
   assert.ok(row.unfoldedChars > row.foldedChars)
 })
+test('轮次号取会话轮次：同一轮被 steering 切开时标续接，未知轮次按相邻推断', () => {
+  const userMessage = (text) => message('user', text, { source: { kind: 'user' } })
+  const messages = [
+    userMessage('第一句'),
+    checkpoint('f1', NOTE_1),
+    userMessage('轮内插话'),
+    checkpoint('f2', NOTE_2),
+    userMessage('下一轮'),
+    message('assistant', '收尾', { source: { kind: 'model', provider: 'p', model: 'm' } }),
+  ]
+  // 两条记录都属于会话第 1 轮：用户在同轮里又补了一句。
+  const folds = new Map([
+    ['f1', { kind: 'fold', id: 'f1', turn: 1, at: 1000, chars: 100, note: NOTE_1, items: [] }],
+    ['f2', { kind: 'fold', id: 'f2', turn: 1, at: 2000, chars: 120, note: NOTE_2, items: [] }],
+  ])
+  const model = buildReportModel({ sessionId: 's', derivedMessages: messages, folds, pins: [], recalls: [] })
+  const groups = model.turnGroups.filter((group) => group.kind === 'turn')
+  assert.equal(groups.length, 3)
+  assert.equal(groups[0].turn, 1)
+  assert.equal(groups[0].continuation, false)
+  assert.equal(groups[1].turn, 1)
+  assert.equal(groups[1].continuation, true)
+  assert.equal(groups[2].turn, 2)
+  assert.equal(groups[2].continuation, false)
+
+  const html = buildHtmlReport(model)
+  assert.ok(html.indexOf('轮内续接') >= 0)
+})
+
+test('插件生效前的未折叠轮次按第一个折叠轮次向前回填编号', () => {
+  const messages = [
+    message('user', '插件装上之前的对话', { source: { kind: 'user' } }),
+    message('assistant', '旧回复', { source: { kind: 'model', provider: 'p', model: 'm' } }),
+    message('user', '装上之后', { source: { kind: 'user' } }),
+    checkpoint('f5', '【已折叠历史】 第 2 轮已折叠，原文用 fold_recall("f5") 召回'),
+  ]
+  const folds = new Map([
+    ['f5', { kind: 'fold', id: 'f5', turn: 2, at: 1000, chars: 80, note: 'x', items: [] }],
+  ])
+  const model = buildReportModel({ sessionId: 's', derivedMessages: messages, folds, pins: [], recalls: [] })
+  const groups = model.turnGroups.filter((group) => group.kind === 'turn')
+  assert.equal(groups[0].turn, 1)
+  assert.equal(groups[0].prePlugin, true)
+  assert.equal(groups[1].turn, 2)
+  assert.equal(groups[1].folded, true)
+})
+
+test('一条 fold 记录都没有时按出现顺序编号', () => {
+  const messages = [
+    message('user', 'a', { source: { kind: 'user' } }),
+    message('assistant', 'b', { source: { kind: 'model', provider: 'p', model: 'm' } }),
+    message('user', 'c', { source: { kind: 'user' } }),
+  ]
+  const model = buildReportModel({ sessionId: 's', derivedMessages: messages, folds: new Map(), pins: [], recalls: [] })
+  const groups = model.turnGroups.filter((group) => group.kind === 'turn')
+  assert.equal(groups.length, 2)
+  assert.equal(groups[0].turn, 1)
+  assert.equal(groups[1].turn, 2)
+})
 
 test('载荷缺失时保留摘要、记下编号并给出告警', () => {
   const messages = [checkpoint('f9', '【已折叠历史】 第 9 轮已折叠'), message('user', 'hi')]
