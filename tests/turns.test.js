@@ -212,3 +212,39 @@ test('没折叠且内容太少时标为内容较少', () => {
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups[0].short, true)
 })
+test('下一轮的触发消息被折掉时，用检查点里的 turn 换轮', () => {
+  const groups = buildTurnGroups({
+    entries: [
+      userEntry('第一句'),
+      assistantEntry('答一段'),
+      checkpointEntry({ foldId: 'f1', turn: 1, noteChars: 30, items: [] }),
+      // 第二轮的触发消息（调度器投递）被折进 f2，模型视角里只剩一条检查点。
+      checkpointEntry({
+        foldId: 'f2',
+        turn: 2,
+        noteChars: 30,
+        items: [{ seq: 7, chars: 200, blocks: [{ kind: 'reply', name: '', text: '答二' }] }],
+      }),
+      userEntry('第三句'),
+    ],
+    minFoldChars: 10,
+  })
+  const turnGroups = groups.filter((group) => group.kind === 'turn')
+  assert.deepEqual(turnGroups.map((group) => group.turn), [1, 2, 3])
+  assert.deepEqual(turnGroups[1].foldIds, ['f2'])
+  assert.equal(turnGroups[1].steps, 1)
+})
+
+test('同一轮被切成多条检查点时不换轮', () => {
+  const groups = buildTurnGroups({
+    entries: [
+      userEntry('第一句'),
+      checkpointEntry({ foldId: 'f1a', turn: 1, noteChars: 20, items: [] }),
+      checkpointEntry({ foldId: 'f1b', turn: 1, noteChars: 20, items: [] }),
+    ],
+    minFoldChars: 10,
+  })
+  const turnGroups = groups.filter((group) => group.kind === 'turn')
+  assert.equal(turnGroups.length, 1)
+  assert.deepEqual(turnGroups[0].foldIds, ['f1a', 'f1b'])
+})
