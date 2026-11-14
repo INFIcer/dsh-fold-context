@@ -268,13 +268,17 @@ window.__ModuleLoader__.load({
         h(Kpi, { label: '实际输入', value: latest ? formatTokens(latest.promptTokens) : '—', color: '#60a5fa', hint: latest ? '最近一次请求；有回报的 ' + (totals.actualTurns || 0) + ' 轮累计 ' + formatTokens(totals.actualPromptTokens || 0) : '本进程还没有拿到 provider 回报' })
       )
       var drift = cost.drift || null
+      var governed = drift ? (drift.governedTokens || 0) : 0
       var note = drift
-        ? '估算的会话历史约 ' + formatTokens(drift.estimateTokens) + ' token' +
-          (drift.legacyTokens > 0 ? '（含插件生效前那一轮约 ' + formatTokens(drift.legacyTokens) + ' token，它没被折叠）' : '') +
-          '；provider 实测最近一次请求 ' + formatTokens(drift.actualPromptTokens) + ' token。' +
-          (drift.overEstimate
-            ? '差在两处：请求期压缩器（例如 billion-context）会把插件生效前的历史改短，而实际请求又会带上工具定义等历史之外的内容。相对比例仍成立。'
-            : '两者同向。')
+        ? '本插件覆盖的历史约 ' + formatTokens(governed) + ' token' +
+          (drift.legacyTokens > 0 ? '（另有插件生效前那一轮约 ' + formatTokens(drift.legacyTokens) + ' token 从未被折叠，实测里已被请求期压缩器改写，不计入这个口径）' : '') +
+          '；provider 实测最近一次请求 ' + formatTokens(drift.actualPromptTokens) + ' token' +
+          (drift.externalTokens > 0 ? '，其中约 ' + formatTokens(drift.externalTokens) + ' token 是历史之外的开销（工具定义、请求期压缩器注入的摘要）' : '') + '。' +
+          (drift.underEstimate
+            ? '实测比本插件覆盖的部分大，差额来自历史之外的开销；折叠省下的量仍按同一套重放口径算。'
+            : drift.governedRatio
+              ? '实测约为本插件覆盖部分的 ' + Math.round(drift.governedRatio * 100) + '%。'
+              : '')
         : '实际输入要等本轮有一次模型调用后才会出现。'
       var body = rows.length === 0
         ? h('div', { style: C.notice }, '还没有可估算的轮次。')

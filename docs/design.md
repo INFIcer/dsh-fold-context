@@ -123,7 +123,13 @@ billion-context 在请求侧重写历史，不写 DSH 会话日志，也不读 `
 
 ### 实际请求为什么单独显示
 
-估算量的是会话历史，provider 回报的是真正上行的 token。billion-context 这类代理在请求期又压缩了一次，两边的差可能很大（本会话实测过估算 37 万、provider 回报 8 万）。把实际值并排显示，并给出 `cost.drift` 的比值，比调低估算系数诚实：估算不参与反事实推算，只当 ground truth。
+估算量的是会话历史，provider 回报的是真正上行的 token。billion-context 这类代理在请求期又压缩了一次，两边的差可能很大（本会话实测过估算 37 万、provider 回报 8 万）。差不是估算算错了，是两句话口径不同，所以 `cost.drift` 把它拆成三段：
+
+- `governedTokens`：归折叠管的部分，即插件生效后的历史加当前系统提示。这一段能和实测并排比。
+- `legacyTokens`：插件生效前的那一轮，插件永远折不动它，实测里它已被请求期压缩器改写。把它单列，估算就不会看起来系统性偏高。
+- `externalTokens`：实测减去 governed 的余量，来自历史之外——工具定义、请求期压缩器注入的摘要。
+
+比调低估算系数诚实：估算不参与反事实推算，只当 ground truth；拆口径只改解释，不改账。
 
 一开始这个差还有一半是我们的错：surface 里留着 6 份历史版本的系统提示词，统计时全算了进去，光这一项就多出十几万 token。宿主只把最后一条 `system` 当生效提示，于是 `excludeStaleSystem`（`lib/inspect.js`）把更早的版本从「模型视角」总量里扣掉，`lib/composition.js` 把它们标成 `reference` 只展示不计入，`lib/cost.js` 也只累加当前那条。另一半差额来自请求期压缩器，这部分不在本插件能看到的数据里。
 

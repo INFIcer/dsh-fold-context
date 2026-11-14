@@ -139,6 +139,10 @@ test('drift 给出会话历史估算与 provider 实测的对照', () => {
   assert.equal(cost.drift.actualPromptTokens, 1020)
   assert.ok(cost.drift.ratio > 0)
   assert.equal(cost.drift.overEstimate, cost.totals.contextFoldedTokens > 1020 * 1.3)
+  // 没有插件生效前的历史时，「归折叠管的部分」就是整份历史，实测差额全是历史之外的开销。
+  assert.equal(cost.drift.governedTokens, cost.totals.contextFoldedTokens)
+  assert.equal(cost.drift.externalTokens, Math.max(0, 1020 - cost.totals.contextFoldedTokens))
+  assert.equal(cost.drift.underEstimate, cost.totals.contextFoldedTokens > 1020 * 1.3)
 })
 
 test('drift 把插件生效前那一轮单列出来', () => {
@@ -157,6 +161,11 @@ test('drift 把插件生效前那一轮单列出来', () => {
   assert.equal(cost.totals.legacyTokens, estimateChars(40000))
   assert.equal(cost.drift.legacyTokens, estimateChars(40000))
   assert.equal(cost.drift.eraTokens, cost.drift.estimateTokens - estimateChars(40000))
+  // 页面并排比的是 governedTokens 和实测：生效前那一轮不进这个口径。
+  assert.equal(cost.drift.governedTokens, cost.drift.eraTokens)
+  assert.equal(cost.drift.externalTokens, 4000 - cost.drift.governedTokens)
+  assert.equal(cost.drift.underEstimate, false)
+  assert.ok(cost.drift.governedRatio > 1)
 })
 
 test('normalizeLatest 把 tracker 的最近一次回报换成展示口径', () => {
