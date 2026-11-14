@@ -130,6 +130,15 @@ window.__ModuleLoader__.load({
       diffAdd: { background: 'rgba(52,211,153,.14)' },
       diffDel: { background: 'rgba(248,113,113,.14)' },
       diffFull: { marginTop: '8px' },
+      compBar: { display: 'flex', width: '100%', height: '14px', borderRadius: '4px', overflow: 'hidden', background: 'rgba(128,128,128,.14)' },
+      compSeg: { height: '100%' },
+      compLegend: { display: 'grid', gridTemplateColumns: 'minmax(120px, 1fr) auto auto', gap: '4px 14px', fontSize: '12px', alignItems: 'center' },
+      compCell: { fontVariantNumeric: 'tabular-nums', textAlign: 'right' },
+      compName: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px' },
+      compNote: { fontSize: '11px', opacity: 0.6, lineHeight: '18px' },
+      chart: { width: '100%', height: 'auto', display: 'block' },
+      toggleOn: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.5)', background: 'rgba(128,128,128,.18)', color: 'inherit', cursor: 'pointer', fontWeight: 600 },
+      toggleOff: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.28)', background: 'transparent', color: 'inherit', cursor: 'pointer', opacity: 0.65 },
     }
 
     var KIND_COLORS = {
@@ -513,38 +522,212 @@ window.__ModuleLoader__.load({
       return h('details', { style: C.turn, onToggle: opened[1] }, summary, body)
     }
 
-    // 重要消息：永不折叠，跟着轮次排在这里而不是账本末尾。
-    function PinsPanel(props) {
-      var pins = Array.isArray(props.pins) ? props.pins : []
-      var opened = useLazyOpen()
-      var totalChars = 0
-      for (var i = 0; i < pins.length; i += 1) totalChars += pins[i].chars || 0
-      var latest = pins.length > 0 ? String(pins[pins.length - 1].label || '') : ''
-      var summary = h('summary', { style: C.turnSummary },
-        h('div', { style: C.turnHead },
-          h('span', { style: C.turnNo }, '重要消息'),
-          h('span', { style: C.tag }, pins.length + ' 条'),
-          h('span', { style: C.turnMeta }, pins.length ? '共 ' + formatChars(totalChars) + ' · 永不折叠' : '还没有')
-        ),
-        pins.length ? h('div', { style: C.peek }, h('span', { style: C.peekKey }, '最新'), h('span', {}, preview(latest, 80))) : null
-      )
-      var body = null
-      if (opened[0]) {
-        body = h('div', { style: C.turnBody }, pins.length === 0
-          ? h('div', { style: C.notice }, '还没有重要消息。需要长期复用的结论用 fold_pin 固化，它永不折叠，但会一直占着上下文。')
-          : pins.map(function (pin, index) {
-              var meta = (typeof pin.turn === 'number' ? 'T' + pin.turn : '—') + ' · ' + formatChars(pin.chars)
-              if (pin.seq !== null && pin.seq !== undefined) meta += ' · #' + pin.seq
-              return h('div', { key: 'p' + index, style: Object.assign({}, C.entry, tint('pin')) },
-                h('div', { style: C.entryHead },
-                  h('span', { style: C.entryRole }, pin.label),
-                  h('span', { style: C.entryMeta }, meta)
-                ),
-                h(BlockList, { blocks: pin.blocks, wide: props.wide })
-              )
-            }))
+    // ---------- 上下文构成（模型视角页顶部） ----------
+    // 参考宿主「上下文趋势」的堆叠面积图：横轴按块（轮次 / 系统提示词版本），纵轴 token，
+    // 颜色按用途分段。token 口径与宿主 token-meter 的基本档一致：4 字符 ≈ 1 token。
+    // 两种视角可切换：折叠后 = 模型现在看到的；不折叠 = 假设一次都没折过。
+
+    var COMPOSITION_KEYS = ['system', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
+
+    var COMPOSITION_COLORS = {
+      system: '#8b949e',
+      user: '#3b82f6',
+      assistant: '#34d399',
+      tools: '#f59e0b',
+      inject: '#a78bfa',
+      checkpoint: '#22d3ee',
+      pin: '#f472b6',
+    }
+
+    function compositionColor(key) {
+      return COMPOSITION_COLORS[key] || '#8b949e'
+    }
+
+    function compositionValue(point, view, mode, key) {
+      if (!point) return 0
+      var bucket = mode === 'step' ? point[view] : point.cumulative ? point.cumulative[view] : null
+      var chars = bucket && typeof bucket[key] === 'number' ? bucket[key] : 0
+      return chars / 4
+    }
+
+    // 纵轴上限取整到 1/2/5 的整数倍，刻度不出现 3.7 这种数。
+    function niceCeil(value) {
+      if (!(value > 0)) return 1
+      var power = Math.pow(10, Math.floor(Math.log10(value)))
+      var unit = value / power
+      var step = unit <= 1 ? 1 : unit <= 2 ? 2 : unit <= 5 ? 5 : 10
+      return step * power
+    }
+
+    function CompositionChart(props) {
+      var points = Array.isArray(props.points) ? props.points : []
+      var view = props.view === 'unfolded' ? 'unfolded' : 'folded'
+      var mode = props.mode === 'step' ? 'step' : 'total'
+      var width = 760
+      var height = 220
+      var padLeft = 54
+      var padRight = 14
+      var padTop = 12
+      var padBottom = 30
+      var count = points.length
+      if (count < 2) return h('div', { style: C.compNote }, '块数不足，画不了趋势图。')
+      var plotWidth = width - padLeft - padRight
+      var plotHeight = height - padTop - padBottom
+      var stacks = []
+      var max = 0
+      for (var i = 0; i < count; i += 1) {
+        var running = 0
+        var row = []
+        for (var k = 0; k < COMPOSITION_KEYS.length; k += 1) {
+          running += compositionValue(points[i], view, mode, COMPOSITION_KEYS[k])
+          row.push(running)
+        }
+        stacks.push(row)
+        if (running > max) max = running
       }
-      return h('details', { style: C.turn, onToggle: opened[1] }, summary, body)
+      var top = niceCeil(max)
+      function xAt(index) {
+        return padLeft + (plotWidth * index) / (count - 1)
+      }
+      function yAt(value) {
+        return padTop + plotHeight - (plotHeight * value) / top
+      }
+      var grid = []
+      for (var g = 0; g <= 4; g += 1) {
+        var tick = (top * g) / 4
+        var y = yAt(tick)
+        grid.push(h('line', { key: 'g' + g, x1: padLeft, y1: y, x2: width - padRight, y2: y, stroke: 'rgba(128,128,128,.22)', strokeWidth: 1 }))
+        grid.push(h('text', { key: 't' + g, x: padLeft - 8, y: y + 3, fontSize: 10, fill: 'currentColor', opacity: 0.55, textAnchor: 'end' }, formatTokens(Math.round(tick))))
+      }
+      var layers = []
+      for (var c = 0; c < COMPOSITION_KEYS.length; c += 1) {
+        var key = COMPOSITION_KEYS[c]
+        var upper = []
+        var lower = []
+        for (var p = 0; p < count; p += 1) {
+          upper.push([xAt(p), yAt(stacks[p][c])])
+          lower.push([xAt(p), yAt(c === 0 ? 0 : stacks[p][c - 1])])
+        }
+        var path = ''
+        for (var u = 0; u < upper.length; u += 1) path += (u === 0 ? 'M' : 'L') + upper[u][0].toFixed(1) + ',' + upper[u][1].toFixed(1) + ' '
+        for (var lo = lower.length - 1; lo >= 0; lo -= 1) path += 'L' + lower[lo][0].toFixed(1) + ',' + lower[lo][1].toFixed(1) + ' '
+        path += 'Z'
+        layers.push(h('path', { key: 'a' + c, d: path, fill: compositionColor(key), fillOpacity: 0.78, stroke: 'none' }))
+      }
+      // 每个块一个透明热区，鼠标停上去看这块的折叠后 / 不折叠 token 数。
+      var hover = []
+      var sliceWidth = plotWidth / (count - 1)
+      for (var hi = 0; hi < count; hi += 1) {
+        var point = points[hi]
+        var fTokens = Math.round((point.totals && point.totals.folded ? point.totals.folded : 0) / 4)
+        var uTokens = Math.round((point.totals && point.totals.unfolded ? point.totals.unfolded : 0) / 4)
+        hover.push(h('rect', {
+          key: 'h' + hi,
+          x: xAt(hi) - sliceWidth / 2,
+          y: padTop,
+          width: sliceWidth,
+          height: plotHeight,
+          fill: 'transparent',
+        }, h('title', {}, (point.label || '第 ' + point.ordinal + ' 块') + ' · 折叠后 ' + formatTokens(fTokens) + ' token · 不折叠 ' + formatTokens(uTokens) + ' token')))
+      }
+      var labels = []
+      var every = Math.max(1, Math.ceil(count / 10))
+      for (var li = 0; li < count; li += 1) {
+        if (li % every !== 0 && li !== count - 1) continue
+        var label = points[li].label || ''
+        if (!label) continue
+        labels.push(h('text', { key: 'l' + li, x: xAt(li), y: height - 10, fontSize: 10, fill: 'currentColor', opacity: 0.6, textAnchor: 'middle' }, label))
+      }
+      return h('svg', { viewBox: '0 0 ' + width + ' ' + height, style: C.chart }, grid.concat(layers, hover, labels))
+    }
+
+    function CompositionPanel(props) {
+      var composition = props.composition || {}
+      var categories = Array.isArray(composition.categories) ? composition.categories : []
+      var points = Array.isArray(composition.points) ? composition.points : []
+      var totals = composition.totals || {}
+      var folded = totals.folded || {}
+      var unfolded = totals.unfolded || {}
+      var sum = totals.sum || {}
+      var foldedTotal = typeof sum.folded === 'number' ? sum.folded : 0
+      var unfoldedTotal = typeof sum.unfolded === 'number' ? sum.unfolded : 0
+      var viewState = react.useState('folded')
+      var modeState = react.useState('total')
+      var view = viewState[0]
+      var mode = modeState[0]
+
+      function bar(bucket, total) {
+        return h('div', { style: C.compBar }, categories.map(function (category) {
+          var value = bucket[category.key] || 0
+          if (!(value > 0)) return null
+          return h('div', {
+            key: category.key,
+            title: category.label + ' ' + formatChars(value),
+            style: Object.assign({}, C.compSeg, {
+              width: (100 * value / (total || 1)) + '%',
+              background: compositionColor(category.key),
+            }),
+          })
+        }))
+      }
+
+      function line(label, bucket, total) {
+        return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          h('div', { style: C.sub }, label + ' · ' + formatChars(total) + ' ≈ ' + formatTokens(Math.round(total / 4)) + ' token'),
+          bar(bucket, total)
+        )
+      }
+
+      var head = h('div', { key: 'head', style: { display: 'contents' } },
+        h('div', { style: C.sub }, '类别'),
+        h('div', { style: Object.assign({}, C.compCell, C.sub) }, '折叠后'),
+        h('div', { style: Object.assign({}, C.compCell, C.sub) }, '不折叠')
+      )
+      var rows = [head]
+      for (var i = 0; i < categories.length; i += 1) {
+        var category = categories[i]
+        var f = folded[category.key] || 0
+        var u = unfolded[category.key] || 0
+        rows.push(h('div', { key: 'r' + category.key, style: { display: 'contents' } },
+          h('div', { style: C.compName },
+            h('span', { style: Object.assign({}, C.dot, { background: compositionColor(category.key) }) }),
+            category.label
+          ),
+          h('div', { style: C.compCell }, formatChars(f)),
+          h('div', { style: C.compCell }, formatChars(u))
+        ))
+      }
+      rows.push(h('div', { key: 'sum', style: { display: 'contents' } },
+        h('div', { style: { fontSize: '12px', fontWeight: 600 } }, '合计'),
+        h('div', { style: Object.assign({}, C.compCell, { fontWeight: 600 }) }, formatChars(foldedTotal)),
+        h('div', { style: Object.assign({}, C.compCell, { fontWeight: 600 }) }, formatChars(unfoldedTotal))
+      ))
+
+      function toggle(label, active, onClick) {
+        return h('button', { style: active ? C.toggleOn : C.toggleOff, onClick: onClick }, label)
+      }
+      var viewToggle = h('div', { style: C.row },
+        toggle('折叠后', view === 'folded', function () { viewState[1]('folded') }),
+        toggle('不折叠', view === 'unfolded', function () { viewState[1]('unfolded') }),
+        h('div', { style: { width: '12px' } }),
+        toggle('总量', mode === 'total', function () { modeState[1]('total') }),
+        toggle('每块增量', mode === 'step', function () { modeState[1]('step') })
+      )
+
+      return h('div', { style: C.section },
+        h('div', { style: C.sectionHead },
+          h('div', { style: C.sectionTitle }, '上下文构成'),
+          h('div', { style: C.sub }, '按用途分类，token 按 4 字符 1 token 估算')
+        ),
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px' } },
+          line('折叠后（模型现在看到的）', folded, foldedTotal),
+          line('不折叠（假设全部展开）', unfolded, unfoldedTotal)
+        ),
+        h('div', { style: C.compLegend }, rows),
+        h('div', { style: { marginTop: '12px' } }, viewToggle),
+        h('div', { style: { marginTop: '10px' } }, h(CompositionChart, { points: points, view: view, mode: mode })),
+        h('div', { style: Object.assign({}, C.compNote, { marginTop: '6px' }) }, '横轴每格是一块历史：T = 轮次，S = 系统提示词的版本。折叠后与不折叠两条曲线都画在同一坐标里，切换视角对比。')
+      )
     }
 
     function TurnCard(props) {
@@ -559,6 +742,11 @@ window.__ModuleLoader__.load({
       if (group.folded) tags.push(h('span', { key: 'folded', style: C.tag }, '已折叠'))
       else if (group.prePlugin) tags.push(h('span', { key: 'pre', style: C.tag }, '插件生效前 · 未折叠'))
       else tags.push(h('span', { key: 'none', style: C.tag }, group.short ? '内容较少 · 未折叠' : '未折叠'))
+      // 重要消息按时间顺序贴在它出现的这一轮旁边，不再在页顶做汇总。
+      var pinLabels = Array.isArray(group.pinLabels) ? group.pinLabels : []
+      for (var pi = 0; pi < pinLabels.length; pi += 1) {
+        tags.push(h('span', { key: 'pin' + pi, style: Object.assign({}, C.tag, { color: '#8250df', borderColor: 'rgba(130,80,223,.45)' }) }, '重要消息·' + pinLabels[pi]))
+      }
       var meta = (group.steps || 0) + ' 步 · ' + formatChars(group.chars) + (group.folded ? ' ← 原文 ' + formatChars(group.unfoldedChars) : '')
       var summary = h('summary', { style: C.turnSummary },
         h('div', { style: C.turnHead },
@@ -576,13 +764,26 @@ window.__ModuleLoader__.load({
         )
       )
       var entries = Array.isArray(group.entries) ? group.entries : []
-      return h('details', { style: C.turn, onToggle: opened[1] },
-        summary,
-        opened[0]
-          ? h('div', { style: C.turnBody }, entries.map(function (entry, index) {
-              return h(EntryView, { key: 'e' + index, entry: entry, wide: props.wide })
-            }))
-          : null
+      var pins = []
+      var rest = []
+      for (var ei = 0; ei < entries.length; ei += 1) {
+        var entry = entries[ei]
+        if (entry && entry.isPin) pins.push(entry)
+        else rest.push(entry)
+      }
+      // 重要消息不从轮里删掉，而是提到轮卡片之外常显：折叠这一轮也能一眼看到。
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+        h('details', { style: C.turn, onToggle: opened[1] },
+          summary,
+          opened[0]
+            ? h('div', { style: C.turnBody }, rest.map(function (item, index) {
+                return h(EntryView, { key: 'e' + index, entry: item, wide: props.wide })
+              }))
+            : null
+        ),
+        pins.map(function (pin, index) {
+          return h(EntryView, { key: 'pin' + index, entry: pin, wide: props.wide })
+        })
       )
     }
 
@@ -648,7 +849,7 @@ window.__ModuleLoader__.load({
         toolbar,
         notice,
         warns.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, warns) : null,
-        h(PinsPanel, { pins: data.pins || [], wide: wide[0] }),
+        data.composition ? h(CompositionPanel, { composition: data.composition }) : null,
         groups.map(function (group, index) {
           return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0] })
         })
@@ -865,6 +1066,13 @@ window.__ModuleLoader__.load({
 
     exports.apply = apply
     exports.inject = ['slots']
+    // 供 node 冒烟测试直接调用组件函数：客户端没有测试框架，暴露内部组件比引入依赖便宜。
+    exports.__test = {
+      CompositionPanel: CompositionPanel,
+      CompositionChart: CompositionChart,
+      TurnCard: TurnCard,
+      entryKindOf: entryKindOf,
+    }
     return module.exports
   },
 })

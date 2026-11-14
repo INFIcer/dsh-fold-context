@@ -241,7 +241,43 @@ test('view 路由带上重要消息，以及系统提示词的版本与差异', 
   assert.equal(systems[1].diff.del, 1)
   assert.deepEqual(body.pins.map((pin) => pin.label), ['结论'])
   assert.ok(body.pins[0].blocks.length > 0)
-  assert.equal(body.version, 2)
+  assert.equal(body.version, 3)
+})
+
+test('view 路由给出上下文构成：分类、折叠后与不折叠两套占比、逐块累计', () => {
+  const messages = [
+    { id: 's1', role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system' } },
+    ...demoMessages,
+    { id: 'p1', role: 'user', content: [{ type: 'text', text: '【重要·永不折叠】 结论' }], source: { kind: 'fold-pin', label: '结论' } },
+  ]
+  const handler = createViewHandler({
+    resolveSessionById: () => fakeSession('s4', messages),
+    makeStore: () => makeStore([]),
+    getConfig: () => ({}),
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq(viewPath + '?session=s4'), res)
+  const body = JSON.parse(res.state.body)
+  const composition = body.composition
+  assert.deepEqual(composition.categories.map((item) => item.key), [
+    'system',
+    'user',
+    'assistant',
+    'tools',
+    'inject',
+    'checkpoint',
+    'pin',
+  ])
+  assert.equal(composition.points.length, body.groups.length)
+  assert.ok(composition.totals.folded.system > 0)
+  assert.ok(composition.totals.folded.user > 0)
+  assert.ok(composition.totals.folded.assistant > 0)
+  assert.ok(composition.totals.folded.pin > 0)
+  assert.ok(composition.totals.sum.folded > 0)
+  const last = composition.points[composition.points.length - 1]
+  assert.deepEqual(last.cumulative.folded, composition.totals.folded)
+  assert.ok(JSON.stringify(composition).length > 0)
 })
 
 test('view 路由缺参数 400、找不到会话 404', () => {

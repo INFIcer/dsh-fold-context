@@ -47,16 +47,16 @@ test('buildNote 带上编号与召回入口，且不超过上限', () => {
   assert.ok(note.length <= 200)
 })
 
-test('isKeeper 只放行用户原话（含调度指令）、重要消息与上一次摘要', () => {
+test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
   assert.equal(isKeeper(userNode(1, 'hi', 'user')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-pin')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-checkpoint')), true)
-  // 调度器投递的是用户指令，折掉它等于吞掉用户的要求。
-  assert.equal(isKeeper(userNode(1, 'hi', 'schedule')), true)
+  // 调度提醒和运行时注入都是上下文，不是用户此刻说的话：折掉后仍能召回，下一轮还会重新注入。
+  assert.equal(isKeeper(userNode(1, 'hi', 'schedule')), false)
   assert.equal(isKeeper(userNode(1, 'hi', 'runtime-context')), false)
 })
 
-test('planSegments 在用户消息处断开，且片段总从 assistant 开始', () => {
+test('planSegments 在用户消息处断开，片段从第一条非 keeper 消息开始', () => {
   const nodes = [
     userNode(1, '开始', 'user'),
     assistantNode(2, { calls: [{ id: 'c1', name: 'read' }] }),
@@ -79,6 +79,23 @@ test('planSegments 丢掉没走完的那一步，不把调用和结果切开', (
   ]
   const segments = planSegments(nodes)
   assert.equal(segments.length, 1)
+  assert.deepEqual(segments[0].map((n) => n.seq), [1, 2])
+})
+
+test('每轮开头的运行时注入自己开一个片段，不再永久留在上下文里', () => {
+  const nodes = [
+    userNode(1, '这次会话的上下文', 'runtime-context'),
+    assistantNode(2, { text: 'a' }),
+    toolNode(3, 'c1', '结果'),
+  ]
+  const segments = planSegments(nodes)
+  assert.equal(segments.length, 1)
+  assert.deepEqual(segments[0].map((n) => n.seq), [1, 2, 3])
+})
+
+test('调度提醒也当上下文折叠', () => {
+  const nodes = [userNode(1, '重启完成', 'schedule'), assistantNode(2, { text: 'a' })]
+  const segments = planSegments(nodes)
   assert.deepEqual(segments[0].map((n) => n.seq), [1, 2])
 })
 

@@ -82,10 +82,82 @@ test('apply 注册对话顶栏 View 与插件页配置位', () => {
   assert.equal(typeof registered[1].component, 'function')
 })
 
+function demoComposition() {
+  const keys = ['system', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
+  const labels = ['系统提示', '用户原话', '思考与回复', '工具调用与结果', '上下文注入', '折叠摘要', '重要消息']
+  const bucket = (values) => {
+    const out = {}
+    keys.forEach((key, index) => { out[key] = values[index] || 0 })
+    return out
+  }
+  const folded = bucket([90000, 500, 12000, 4000, 1000, 3000, 300])
+  const unfolded = bucket([90000, 500, 900000, 700000, 8000, 0, 300])
+  return {
+    categories: keys.map((key, index) => ({ key, label: labels[index] })),
+    totals: { folded, unfolded, sum: { folded: 108800, unfolded: 1698800 } },
+    points: [
+      {
+        ordinal: 1,
+        kind: 'turn',
+        turn: 1,
+        label: 'T1',
+        folded: bucket([90000, 500, 12000, 4000, 1000, 3000, 0]),
+        unfolded: bucket([90000, 500, 900000, 700000, 8000, 0, 0]),
+        totals: { folded: 110500, unfolded: 1698500 },
+        cumulative: { folded: bucket([90000, 500, 12000, 4000, 1000, 3000, 0]), unfolded: bucket([90000, 500, 900000, 700000, 8000, 0, 0]) },
+      },
+      {
+        ordinal: 2,
+        kind: 'turn',
+        turn: 2,
+        label: 'T2',
+        folded: bucket([0, 0, 300, 0, 0, 0, 300]),
+        unfolded: bucket([0, 0, 300, 0, 0, 0, 300]),
+        totals: { folded: 600, unfolded: 600 },
+        cumulative: { folded, unfolded },
+      },
+    ],
+  }
+}
+
+test('模型视角的构成面板、图表与重要消息行能渲染（冒烟）', () => {
+  const { module } = loadClient()
+  const components = module.__test
+  assert.ok(components, '客户端应暴露内部组件供冒烟测试')
+  const composition = demoComposition()
+  const panel = components.CompositionPanel({ composition })
+  assert.equal(typeof panel, 'object')
+  assert.equal(panel.type, 'div')
+  const chart = components.CompositionChart({ points: composition.points, view: 'unfolded', mode: 'step' })
+  assert.equal(chart.type, 'svg')
+  assert.ok(chart.children.length > 0)
+  // 一轮里带一条重要消息：卡片本身与消息行都要能构造出来
+  const turn = components.TurnCard({
+    group: {
+      kind: 'turn',
+      turn: 2,
+      folded: true,
+      foldIds: ['f2'],
+      pinLabels: ['结论'],
+      entries: [
+        { index: 0, role: 'user', sourceKind: 'user', chars: 20, blocks: [{ kind: 'text', text: 'hi' }] },
+        { index: 1, role: 'user', sourceKind: 'fold-pin', isPin: true, pinLabel: '结论', seq: 9, chars: 12, blocks: [{ kind: 'text', text: 'pin' }] },
+      ],
+    },
+  })
+  assert.equal(typeof turn, 'object')
+  const text = JSON.stringify(panel) + JSON.stringify(turn)
+  assert.ok(text.includes('折叠后'))
+  assert.ok(text.includes('重要消息'))
+})
+
 test('参数表单只挂在插件页，折叠 tab 不再有设置入口', () => {
   const source = readFileSync(clientFile, 'utf8')
   assert.ok(source.includes("['ledger', '账本']"))
   assert.ok(source.includes("['model', '模型视角']"))
   assert.equal(source.includes("'settings', '设置'"), false)
   assert.ok(source.includes("fetch('/fold-config'"))
+  // 重要消息不再在页顶单独汇总，改为按时间顺序贴在轮次里
+  assert.equal(source.includes('PinsPanel'), false)
+  assert.ok(source.includes('data.composition'))
 })
