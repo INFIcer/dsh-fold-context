@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  compositionPath,
   configPath,
+  createCompositionHandler,
   createConfigHandler,
   createReportHandler,
   createStatsHandler,
@@ -85,7 +87,7 @@ test('读载荷抛错时仍然回 200 的空账本', () => {
   assert.equal(JSON.parse(res.state.body).totals.folds, 0)
 })
 
-test('registerStatsRoute 挂四条 exact 路由并随 dispose 撤销', () => {
+test('registerStatsRoute 挂五条 exact 路由并随 dispose 撤销', () => {
   const routes = []
   const ctx = {
     webServer: {
@@ -96,8 +98,8 @@ test('registerStatsRoute 挂四条 exact 路由并随 dispose 撤销', () => {
     },
   }
   const handle = registerStatsRoute({ ctx, log: quietLog, makeStore: () => makeStore([]), getConfig: () => ({}) })
-  assert.equal(routes.length, 4)
-  assert.deepEqual(routes.map((route) => route.path), [statsPath, reportPath, viewPath, configPath])
+  assert.equal(routes.length, 5)
+  assert.deepEqual(routes.map((route) => route.path), [statsPath, reportPath, viewPath, compositionPath, configPath])
   for (const route of routes) assert.equal(route.kind, 'exact')
   handle.dispose()
   for (const route of routes) assert.equal(route.disposed, true)
@@ -278,6 +280,52 @@ test('view 路由给出上下文构成：分类、折叠后与不折叠两套占
   const last = composition.points[composition.points.length - 1]
   assert.deepEqual(last.cumulative.folded, composition.totals.folded)
   assert.ok(JSON.stringify(composition).length > 0)
+})
+
+test('composition 路由只回构成数据，格式与 view 的 composition 一致', () => {
+  const messages = [
+    { id: 's1', role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system' } },
+    ...demoMessages,
+  ]
+  const handler = createCompositionHandler({
+    resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', messages) : undefined),
+    makeStore: () => makeStore([]),
+    getConfig: () => ({ minFoldChars: 1200 }),
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq(compositionPath + '?session=s1'), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.sessionId, 's1')
+  assert.ok(Array.isArray(body.composition.categories) && body.composition.categories.length > 0)
+  assert.ok(Array.isArray(body.composition.points) && body.composition.points.length > 0)
+  assert.ok(body.composition.totals.sum.folded > 0)
+  // 账本只要图数据：整轮明细留在 /fold-view，别让 20 秒一轮的轮询背上大包。
+  assert.equal('groups' in body, false)
+})
+
+test('composition 路由缺参数 400、找不到会话 404、空历史给空构成', () => {
+  const handler = createCompositionHandler({
+    resolveSessionById: (id) => (id === 's2' ? fakeSession('s2', []) : undefined),
+    makeStore: () => makeStore([]),
+    getConfig: () => ({}),
+    log: quietLog,
+  })
+  const missing = fakeRes()
+  handler(fakeReq(compositionPath), missing)
+  assert.equal(missing.state.status, 400)
+  assert.match(JSON.parse(missing.state.body).error, /session/)
+
+  const gone = fakeRes()
+  handler(fakeReq(compositionPath + '?session=gone'), gone)
+  assert.equal(gone.state.status, 404)
+
+  const empty = fakeRes()
+  handler(fakeReq(compositionPath + '?session=s2'), empty)
+  assert.equal(empty.state.status, 200)
+  assert.deepEqual(JSON.parse(empty.state.body).composition.points, [])
 })
 
 test('view 路由缺参数 400、找不到会话 404', () => {

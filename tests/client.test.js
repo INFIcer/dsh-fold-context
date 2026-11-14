@@ -120,7 +120,7 @@ function demoComposition() {
   }
 }
 
-test('模型视角的构成面板、图表与重要消息行能渲染（冒烟）', () => {
+test('构成面板、图表与重要消息行能渲染（冒烟）', () => {
   const { module } = loadClient()
   const components = module.__test
   assert.ok(components, '客户端应暴露内部组件供冒烟测试')
@@ -165,5 +165,10 @@ test('参数表单只挂在插件页，折叠 tab 不再有设置入口', () => 
   assert.ok(source.includes("fetch('/fold-config'"))
   // 重要消息不再在页顶单独汇总，改为按时间顺序贴在轮次里
   assert.equal(source.includes('PinsPanel'), false)
-  assert.ok(source.includes('data.composition'))
+  // 构成图跟着账本走：账本单独拉 /fold-composition，模型视角不再画它
+  assert.ok(source.includes("fetch('/fold-composition?session='"))
+  assert.ok(source.includes('COMPOSITION_REFRESH_MS'))
+  assert.equal(source.includes('data.composition'), false)
+  // 两张图左右并排，窄屏自动堆叠，不再被拉成一整条
+  assert.ok(source.includes('repeat(auto-fit, minmax(320px, 1fr))'))
 })

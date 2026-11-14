@@ -92,9 +92,10 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 
 插件自带客户端 bundle（`client/client.js`，手写 CJS，不需要构建），在会话顶栏注册一个「折叠」Tab（`conversation.view`，order 20）。页面分两个子页：
 
-- **账本**：每 5 秒拉一次同源 `GET /fold-stats?session=<会话 id>`，看 token 收支。
-- **模型视角**：拉 `GET /fold-view?session=<会话 id>`，按轮展示 `session.deriveMessages()` 派生出的真实历史——也就是折叠后模型实际收到的样子；折叠检查点展开可对照被替换掉的原文。
+- **账本**：每 5 秒拉一次同源 `GET /fold-stats?session=<会话 id>`，看 token 收支；另外每 20 秒拉一次 `GET /fold-composition?session=<会话 id>` 单独更新构成图，不跟整份模型视角一起重拉。
   - 顶部是「上下文构成」：折叠后与不折叠两条 100% 堆叠条、七类占比表（系统提示 / 用户原话 / 思考与回复 / 工具 / 注入 / 折叠摘要 / 重要消息），以及堆叠面积时间线（横轴每格一块历史；面积是当前视角，虚线是另一视角的总量，可切总量与每块增量）。
+  - 两张图左右并排（窄屏自动堆叠）：构成图回答「省掉的是哪一类」，趋势图回答「省下的量怎么累积」，并排放才方便对照，也不会被拉成一整条横线。
+- **模型视角**：拉 `GET /fold-view?session=<会话 id>`，按轮展示 `session.deriveMessages()` 派生出的真实历史——也就是折叠后模型实际收到的样子；折叠检查点展开可对照被替换掉的原文。
   - 重要消息不再单独汇总，而是按时间顺序贴在它出现的那一轮卡片之后，紫色常显、展开可读全文——汇总会丢掉「什么时候写下的」这条信息。
   - 系统提示词按出现时间就地成块，不进轮次编号；第 1 版展示全文，第 2 版起默认只展示与上一版的差异（`+`/`-` 行、`@@` 段头），另给「查看这一版全文」。
   - 所有卡片默认收起，点开才把正文挂进 DOM，一次展开大量原文也不会卡；这是界面折叠，和插件的上下文折叠无关。
@@ -112,7 +113,7 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 
 页头右侧的「逐轮报告」按钮新窗口打开 `GET /fold-report?session=<会话 id>`：服务端按当前历史现算同一份逐轮 HTML，不落盘、不用先调工具。会话已不在进程里时返回 404 并说明原因。
 
-`/fold-stats` 与 `/fold-report` 只读 `fold-store` 的记录，不需要把会话拉起来；`/fold-view` 需要会话还在进程里（它读的是派生消息）。这四个路由缺 `session` 参数返回 400，找不到会话返回 404；`/fold-config` 另接受 `POST`（`{patch}` 或 `{reset:true}`），其余路由只接受 `GET`/`HEAD`。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响；宿主没有插件页（缺 `ui-plugin-manager`）时参数表单也无处渲染，`fold_config` 工具照旧可用。
+`/fold-stats` 只读 `fold-store` 的记录，不需要会话活着；`/fold-report`、`/fold-view` 与 `/fold-composition` 都要读 `session.deriveMessages()`，会话不在进程里就返回 404。这五个路由缺 `session` 参数返回 400，找不到会话返回 404；`/fold-config` 另接受 `POST`（`{patch}` 或 `{reset:true}`），其余路由只接受 `GET`/`HEAD`。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响；宿主没有插件页（缺 `ui-plugin-manager`）时参数表单也无处渲染，`fold_config` 工具照旧可用。
 
 ## 已知限制
 

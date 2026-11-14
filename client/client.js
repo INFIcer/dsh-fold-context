@@ -13,6 +13,8 @@ window.__ModuleLoader__.load({
 
     var h = react.createElement
     var REFRESH_MS = 5000
+    // 构成图要服务端重建一份模型视角，比账本数字贵得多，单独按更慢的节奏拉。
+    var COMPOSITION_REFRESH_MS = 20000
 
     function formatTokens(value) {
       var n = typeof value === 'number' && isFinite(value) ? value : 0
@@ -255,6 +257,8 @@ window.__ModuleLoader__.load({
       var setPayload = state[1]
       var tick = react.useState(0)
       var alive = react.useRef(true)
+      var compositionState = react.useState({ data: null, error: '' })
+      var setComposition = compositionState[1]
 
       react.useEffect(function () {
         alive.current = true
@@ -277,6 +281,33 @@ window.__ModuleLoader__.load({
         var timer = setInterval(load, REFRESH_MS)
         return function () {
           alive.current = false
+          clearInterval(timer)
+          if (controller) controller.abort()
+        }
+      }, [sessionId, tick[0]])
+
+      // 构成图单独一条通道：它要服务端重建模型视角，失败也只影响这两张图，不动账本数字。
+      react.useEffect(function () {
+        var live = true
+        var controller = typeof AbortController === 'function' ? new AbortController() : null
+        function loadComposition() {
+          fetch('/fold-composition?session=' + encodeURIComponent(sessionId), controller ? { signal: controller.signal } : undefined)
+            .then(readJson)
+            .then(function (body) {
+              if (!live) return
+              setComposition({ data: body && body.composition ? body.composition : null, error: '' })
+            })
+            .catch(function (error) {
+              if (!live || (error && error.name === 'AbortError')) return
+              setComposition(function (previous) {
+                return { data: previous.data, error: String(error && error.message ? error.message : error) }
+              })
+            })
+        }
+        loadComposition()
+        var timer = setInterval(loadComposition, COMPOSITION_REFRESH_MS)
+        return function () {
+          live = false
           clearInterval(timer)
           if (controller) controller.abort()
         }
@@ -306,6 +337,13 @@ window.__ModuleLoader__.load({
         h(Kpi, { label: '重要消息成本', value: formatTokens(-totals.pinTokens), color: totals.pinTokens > 0 ? '#fbbf24' : 'inherit', hint: totals.pins + ' 条固化，共 ' + formatChars(totals.pinChars) }),
         h(Kpi, { label: '净收益', value: (totals.netTokens >= 0 ? '+' : '') + formatTokens(totals.netTokens), color: totals.netTokens >= 0 ? '#34d399' : '#f87171', hint: '当前历史里折叠摘要 + 重要消息约占 ' + formatTokens(data.current ? data.current.tokens : 0) + ' token' })
       )
+
+      var composition = compositionState[0].data
+      var compositionPanel = composition
+        ? h(CompositionPanel, { composition: composition })
+        : compositionState[0].error
+          ? h('div', { style: { fontSize: '11px', color: '#f87171' } }, '上下文构成读取失败：' + compositionState[0].error + '（' + Math.round(COMPOSITION_REFRESH_MS / 1000) + ' 秒后自动重试）')
+          : null
 
       var turns = Array.isArray(data.turns) ? data.turns : []
       var max = 1
@@ -339,7 +377,7 @@ window.__ModuleLoader__.load({
         '估算口径与宿主 token-meter 一致：每 ' + (data.estimate ? data.estimate.charsPerToken : 4) + ' 字符算 1 token，每个文本块再加 ' + (data.estimate ? data.estimate.blockOverhead : 4) + ' token 开销。'
       )
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, toolbar, errorLine, kpis, chartSection, tableSection, footnote)
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, toolbar, errorLine, kpis, compositionPanel, chartSection, tableSection, footnote)
     }
 
     // ---------- 模型视角 ----------
@@ -764,7 +802,9 @@ window.__ModuleLoader__.load({
       }
 
       var saveRate = foldedTotal > 0 ? 1 - foldedTotal / (unfoldedTotal || 1) : 0
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+      // 构成与趋势左右并排：两张图各自窄一点才看得出形状，宽屏也不会被拉成一整条横线。
+      // 容器窄时 auto-fit 自动落回上下排。
+      return h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '12px', alignItems: 'start' } },
         h('div', { style: C.section },
           h('div', { style: C.sectionHead },
             h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' } },
@@ -916,7 +956,6 @@ window.__ModuleLoader__.load({
         toolbar,
         notice,
         warns.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, warns) : null,
-        data.composition ? h(CompositionPanel, { composition: data.composition }) : null,
         groups.map(function (group, index) {
           return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0] })
         })
