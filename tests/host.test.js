@@ -110,26 +110,37 @@ test('召回次数超阈值时给出固化提醒', async () => {
   api.stop()
 })
 
-test('重要消息会被后续轮次跳过，不会被折掉', async () => {
+test('轮内发布的重要消息推迟到折叠之后注入，整轮照常折叠', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
   const ctx = makeCtx()
   const api = assemble(ctx, { homeDir, logFile: null })
   const session = new FakeSession('sess-p')
   session.seed([userNode(1, '开始', 'user')])
-  const pin = await toolNamed(ctx, 'fold_pin').execute({ label: '接口约定', text: '字段名用 snake_case' }, { agent: { session } })
-  assert.equal(pin.ok, true)
-  const pinSeq = session.nodes.at(-1)
 
   emit(ctx, session, { type: 'turn/start', seq: 4, data: { turn: 2 } })
   emit(ctx, session, { type: 'step/start', seq: 5, data: { turn: 2, step: 1 } })
   emitSurface(ctx, session, userNode(6, '继续', 'user'))
-  emitSurface(ctx, session, assistantNode(7, { text: '长'.repeat(2000) }))
-  emit(ctx, session, { type: 'step/end', seq: 8, data: { turn: 2, step: 1 } })
-  emit(ctx, session, { type: 'turn/end', seq: 9, data: { turn: 2, reason: { kind: 'stop' } } })
+  // 模型在轮内调用 fold_pin（assistant 调用 → 工具结果 → 最终回复）
+  const pinTool = toolNamed(ctx, 'fold_pin')
+  emitSurface(ctx, session, assistantNode(7, { reasoning: '想'.repeat(2000), calls: [{ id: 'c1', name: 'fold_pin' }] }))
+  const pin = await pinTool.execute({ label: '接口约定', text: '字段名用 snake_case' }, { agent: { session } })
+  assert.equal(pin.ok, true)
+  emitSurface(ctx, session, toolNode(8, 'c1', '已发布重要消息「接口约定」'))
+  emitSurface(ctx, session, assistantNode(9, { text: '收尾'.repeat(600) }))
+  emit(ctx, session, { type: 'step/end', seq: 10, data: { turn: 2, step: 1 } })
+  emit(ctx, session, { type: 'turn/end', seq: 11, data: { turn: 2, reason: { kind: 'stop' } } })
   await tick()
 
-  assert.ok(session.nodes.includes(pinSeq), '重要消息节点应当还在')
-  assert.ok(checkpointOf(session))
+  const checkpoint = checkpointOf(session)
+  assert.ok(checkpoint, '应当生成检查点')
+  // 调用、结果、收尾回复在同一条连续区间里，整轮一起折
+  assert.equal(checkpoint.surfaceOp.startSeq, 7)
+  assert.equal(checkpoint.surfaceOp.endSeq, 9)
+  // pin 消息在折叠之后注入：seq 比检查点大，且不在被替换区间里
+  const pinEvent = session.events.find((event) => event.data && event.data.source && event.data.source.kind === 'fold-pin')
+  assert.ok(pinEvent, 'pin 消息应当注入')
+  assert.ok(pinEvent.seq > checkpoint.seq, 'pin 应在检查点之后')
+  assert.equal(pinEvent.surfaceOp?.op ?? 'append', 'append')
   assert.ok(session.nodes.includes(6), '用户消息不该被折')
   api.stop()
 })
@@ -298,8 +309,13 @@ test('官方压缩吞掉重要消息时不补发：淡化交给压缩层', async
   const api = assemble(ctx, { homeDir, logFile: null })
   const session = new FakeSession('sess-cp')
   session.seed([userNode(1, '开始', 'user'), assistantNode(2, { text: '答'.repeat(600) })])
+  emit(ctx, session, { type: 'turn/start', seq: 3, data: { turn: 1 } })
+  emit(ctx, session, { type: 'step/start', seq: 4, data: { turn: 1, step: 1 } })
   const pin = await toolNamed(ctx, 'fold_pin').execute({ label: '接口约定', text: '字段名用 snake_case' }, { agent: { session } })
   assert.equal(pin.ok, true)
+  // 轮内发布的消息在 turn 结束时才注入
+  emit(ctx, session, { type: 'turn/end', seq: 5, data: { turn: 1, reason: { kind: 'stop' } } })
+  await tick()
   const pinSeq = session.nodes.at(-1)
 
   // 模拟官方压缩：把 [1..pinSeq] 整段换成一条 compact-checkpoint，pin 正在被遮蔽区间里。
