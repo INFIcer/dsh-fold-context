@@ -10,8 +10,17 @@ import { buildNote, isKeeper, recallItems, statsOf, totalChars } from '../lib/fo
 import { planSegments } from '../lib/plan.js'
 import { foldTurn, publishPin } from '../lib/commit.js'
 import { FoldStore, safeFileName } from '../lib/store.js'
-import { normalizeConfig, defaultConfig } from '../lib/config.js'
-import { FakeSession, assistantNode, toolNode, userNode } from './fakes.js'
+import {
+  ConfigStore,
+  defaultConfig,
+  defaultRecallReminderText,
+  normalizeConfig,
+  noteBudget,
+  validateConfigPatch,
+} from '../lib/config.js'
+import { promptSection, systemPromptText } from '../lib/prompt.js'
+import { recallReminder, registerTools } from '../lib/tools.js'
+import { FakeSession, assistantNode, makeCtx, toolNode, userNode } from './fakes.js'
 
 const silent = { info() {}, warn() {}, error() {} }
 
@@ -170,3 +179,223 @@ test('normalizeConfig 把越界值钳进合法区间', () => {
   assert.equal(config.maxPins, 200)
   assert.equal(defaultConfig().enabled, true)
 })
+
+test('normalizeConfig 覆盖新增字段的钳制与类型守卫', () => {
+  const low = normalizeConfig({
+    noteRatio: 0.001,
+    maxNoteChars: 10,
+    recallReminderAfter: 0,
+    maxFoldsPerTurn: 99,
+    promptOrder: -5000,
+    foldToolOutputs: 'no',
+  })
+  assert.equal(low.noteRatio, 0.02)
+  assert.equal(low.maxNoteChars, 80)
+  assert.equal(low.recallReminderAfter, 1)
+  assert.equal(low.maxFoldsPerTurn, 32)
+  assert.equal(low.promptOrder, -1000)
+  assert.equal(low.foldToolOutputs, true, '类型不对时保留原值')
+
+  const high = normalizeConfig({ noteRatio: 0.99, maxNoteChars: 99999, promptOrder: 99999 })
+  assert.equal(high.noteRatio, 0.5)
+  assert.equal(high.maxNoteChars, 4000)
+  assert.equal(high.promptOrder, 10000)
+})
+
+test('normalizeConfig 忽略未知键并回调 warn', () => {
+  const warnings = []
+  const config = normalizeConfig({ bogus: 1, minFoldChars: 300 }, defaultConfig(), (message) => warnings.push(message))
+  assert.equal(config.minFoldChars, 300)
+  assert.equal(Object.prototype.hasOwnProperty.call(config, 'bogus'), false)
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0].includes('bogus'))
+  assert.ok(warnings[0].includes('已忽略'))
+})
+
+test('noteBudget 按比例计算，并受 80 与 maxNoteChars 两头夹住', () => {
+  assert.equal(noteBudget(100000, normalizeConfig({})), 320)
+  assert.equal(noteBudget(2000, normalizeConfig({ noteRatio: 0.1, maxNoteChars: 320 })), 200)
+  assert.equal(noteBudget(1000, normalizeConfig({ noteRatio: 0.05 })), 80)
+  assert.equal(noteBudget(5000, normalizeConfig({ noteRatio: 0.5, maxNoteChars: 2000 })), 2000)
+})
+
+test('ConfigStore 落盘后能被下一次 load 读到，文件覆盖 profile 配置', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const store = new ConfigStore({ homeDir, log: silent })
+  store.load({ minFoldChars: 900 })
+  assert.equal(store.get().minFoldChars, 900)
+
+  const saved = store.save({ noteRatio: 0.2 })
+  assert.equal(saved.noteRatio, 0.2)
+  const raw = JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8'))
+  assert.equal(raw.noteRatio, 0.2)
+  assert.equal(raw.minFoldChars, 900)
+
+  const again = new ConfigStore({ homeDir, log: silent })
+  const loaded = again.load({ minFoldChars: 300 })
+  assert.equal(loaded.minFoldChars, 900, '文件里的值优先')
+  assert.equal(loaded.noteRatio, 0.2)
+})
+
+test('validateConfigPatch 只收白名单键，且逐项拒绝非法值', () => {
+  const ok = validateConfigPatch({ noteRatio: 0.2, foldToolOutputs: false })
+  assert.equal(ok.ok, true)
+  assert.deepEqual(ok.patch, { noteRatio: 0.2, foldToolOutputs: false })
+
+  const unknown = validateConfigPatch({ nope: 1 })
+  assert.equal(unknown.ok, false)
+  assert.ok(unknown.errors.join(' ').includes('未知配置项 nope'))
+
+  const range = validateConfigPatch({ noteRatio: 1 })
+  assert.equal(range.ok, false)
+  assert.ok(range.errors.join(' ').includes('0.02~0.5'))
+
+  const integer = validateConfigPatch({ maxFoldsPerTurn: 2.5 })
+  assert.equal(integer.ok, false)
+  assert.ok(integer.errors.join(' ').includes('整数'))
+
+  assert.equal(validateConfigPatch({}).ok, false)
+  assert.equal(validateConfigPatch(null).ok, false)
+})
+
+test('systemPromptText 支持占位替换与自定义文案', () => {
+  const text = systemPromptText(defaultConfig())
+  assert.equal(text.includes('{{'), false)
+  assert.ok(text.includes('fold_recall'))
+  assert.ok(text.includes('fold_pin'))
+  assert.ok(text.includes('fold_config'))
+  assert.ok(text.includes('10%'))
+
+  const custom = systemPromptText({ noteRatio: 0.25, systemPromptText: '召回 {{recallTool}}，固化 {{pinTool}}，比率 {{ratio}}，调 {{configTool}}，未知 {{keep}}' })
+  assert.ok(custom.includes('召回 fold_recall'))
+  assert.ok(custom.includes('25%'))
+  assert.ok(custom.includes('{{keep}}'), '未知占位原样保留')
+  assert.equal(systemPromptText({ systemPromptText: '' }), '')
+})
+
+test('promptSection 用配置里的 order，默认 order 是 300', () => {
+  const fallback = promptSection(defaultConfig())
+  assert.equal(fallback.name, 'fold-compression')
+  assert.equal(fallback.order, 300)
+  assert.equal(fallback.interpolate, false)
+  const moved = promptSection(normalizeConfig({ promptOrder: 120 }))
+  assert.equal(moved.order, 120)
+})
+
+test('recallReminder 支持阈值与自定义文案占位', () => {
+  assert.equal(recallReminder(3, 3), '')
+  const text = recallReminder(4, 3)
+  assert.equal(defaultRecallReminderText.length > 0, true)
+  assert.ok(text.includes('4 次'))
+  assert.ok(text.includes('fold_pin'))
+  assert.equal(recallReminder(4, 3, '召回 {count} 次就用 {tool}'), '召回 4 次就用 fold_pin')
+  assert.equal(recallReminder(9, 3, ''), '')
+})
+
+test('foldToolOutputs=false 时摘要、体量与召回载荷都不含工具输出', () => {
+  const stats = statsOf([
+    assistantNode(1, { reasoning: 'x'.repeat(300), text: 'y'.repeat(100), calls: [{ id: 'c1', name: 'read' }] }),
+    toolNode(2, 'c1', 'z'.repeat(500)),
+  ])
+  assert.equal(totalChars(stats), 900)
+  assert.equal(totalChars(stats, false), 400)
+  const note = buildNote({ foldId: 'f1', turn: 1, stats, maxChars: 300, toolName: 'fold_recall', includeToolOutputs: false })
+  assert.equal(note.includes('工具输出'), false)
+  const items = recallItems([toolNode(3, 'c1', '秘密')], 1000, false)
+  assert.equal(items.length, 0)
+
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const session = new FakeSession('sess-no-tools')
+  const nodes = [
+    userNode(1, '开始', 'user'),
+    assistantNode(2, { reasoning: '思'.repeat(800), calls: [{ id: 'c1', name: 'read' }] }),
+    toolNode(3, 'c1', '果'.repeat(600)),
+  ]
+  session.seed(nodes)
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+  const result = foldTurn({
+    session,
+    turn: 1,
+    nodes,
+    config: normalizeConfig({ minFoldChars: 1200, foldToolOutputs: false }),
+    store,
+    log: silent,
+  })
+  assert.equal(result.folded, 0, '只算思考的 800 字，不到阈值')
+})
+
+test('foldTurn 用 maxFoldsPerTurn 限制每轮折几段', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const session = new FakeSession('sess-limit')
+  const nodes = [
+    userNode(1, '一', 'user'),
+    assistantNode(2, { reasoning: 'a'.repeat(300) }),
+    userNode(3, '二', 'user'),
+    assistantNode(4, { reasoning: 'b'.repeat(300) }),
+    userNode(5, '三', 'user'),
+    assistantNode(6, { reasoning: 'c'.repeat(300) }),
+  ]
+  session.seed(nodes)
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+  const result = foldTurn({
+    session,
+    turn: 1,
+    nodes,
+    config: normalizeConfig({ minFoldChars: 200, maxFoldsPerTurn: 2 }),
+    store,
+    log: silent,
+  })
+  assert.equal(result.folded, 2)
+  assert.deepEqual(result.ids, ['f1a', 'f1b'])
+})
+
+test('fold_config 支持 get/set/reset，并拒绝非法键', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const configStore = new ConfigStore({ homeDir, log: silent })
+  configStore.load({})
+  const ctx = makeCtx()
+  const updates = []
+  registerTools({
+    ctx,
+    getStore: () => undefined,
+    getConfig: () => configStore.get(),
+    resolveSession: () => undefined,
+    log: silent,
+    homeDir,
+    updateConfig: (patch) => {
+      updates.push(patch)
+      return configStore.save(patch)
+    },
+  })
+  const tool = ctx.registrations.find((item) => item.name === 'fold_config')
+  assert.ok(tool, 'fold_config 应当已注册')
+
+  const got = await tool.execute({ action: 'get' }, {})
+  assert.equal(got.ok, true)
+  assert.ok(got.text.includes('noteRatio'))
+  assert.ok(got.text.includes('0.02~0.5'))
+  assert.equal(got.config.noteRatio, 0.1)
+  assert.equal(got.filePath, join(homeDir, 'fold-config.json'))
+
+  const set = await tool.execute({ action: 'set', patch: { noteRatio: 0.2 } }, {})
+  assert.equal(set.ok, true)
+  assert.equal(updates.length, 1)
+  assert.equal(configStore.get().noteRatio, 0.2)
+  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).noteRatio, 0.2)
+
+  const badKey = await tool.execute({ action: 'set', patch: { nope: 1 } }, {})
+  assert.equal(badKey.ok, false)
+  assert.ok(badKey.text.includes('未知配置项 nope'))
+  assert.equal(updates.length, 1, '非法 patch 不能触发热更新')
+  assert.equal(configStore.get().noteRatio, 0.2)
+
+  const badRange = await tool.execute({ action: 'set', patch: { noteRatio: 9 } }, {})
+  assert.equal(badRange.ok, false)
+  assert.ok(badRange.text.includes('0.02~0.5'))
+
+  const reset = await tool.execute({ action: 'reset' }, {})
+  assert.equal(reset.ok, true)
+  assert.equal(configStore.get().noteRatio, 0.1)
+  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).noteRatio, 0.1)
+})
+

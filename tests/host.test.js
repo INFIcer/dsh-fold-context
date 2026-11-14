@@ -30,7 +30,7 @@ function toolNamed(ctx, name) {
   return ctx.registrations.find((definition) => definition.name === name)
 }
 
-test('turn/end 后把本轮折叠成一条检查点消息，并注入提示段与两个工具', async () => {
+test('turn/end 后把本轮折叠成一条检查点消息，并注入提示段与三个工具', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
   const ctx = makeCtx()
   const api = assemble(ctx, { homeDir, logFile: null })
@@ -59,6 +59,22 @@ test('turn/end 后把本轮折叠成一条检查点消息，并注入提示段�
   assert.ok(ctx.sections.some((section) => section.name === 'fold-compression'))
   assert.ok(toolNamed(ctx, 'fold_recall'))
   assert.ok(toolNamed(ctx, 'fold_pin'))
+  assert.ok(toolNamed(ctx, 'fold_config'))
+
+  // fold_config 的 get 与 set 都走真实接线：set 要落盘，并让提示段当场重建。
+  const configTool = toolNamed(ctx, 'fold_config')
+  const shown = await configTool.execute({ action: 'get' }, { agent: { session } })
+  assert.equal(shown.ok, true)
+  assert.ok(shown.text.includes('noteRatio'))
+  assert.ok(shown.text.includes('配置文件'))
+  assert.ok(shown.text.includes('fold-config.json'))
+  const saved = await configTool.execute({ action: 'set', patch: { noteRatio: 0.2 } }, { agent: { session } })
+  assert.equal(saved.ok, true)
+  const onDisk = JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8'))
+  assert.equal(onDisk.noteRatio, 0.2)
+  assert.equal(api.getConfig().noteRatio, 0.2)
+  // 提示段随配置重建：新比率要出现在新版文案里。
+  assert.ok(ctx.sections.some((section) => section.text && section.text.includes('20%')))
 
   const recalled = await toolNamed(ctx, 'fold_recall').execute({ id: 'f1' }, { agent: { session } })
   assert.equal(recalled.ok, true)
