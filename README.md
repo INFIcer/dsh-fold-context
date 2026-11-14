@@ -73,6 +73,19 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 
 不传 `sessionId` 就检查当前会话；找不到会话或原文载荷缺失时返回明确原因，不抛错。
 
+## 顶栏「折叠」页
+
+插件自带客户端 bundle（`client/client.js`，手写 CJS，不需要构建），在会话顶栏注册一个「折叠」Tab（`conversation.view`，order 20）。页面每 5 秒拉一次同源 `GET /fold-stats?session=<会话 id>`，显示：
+
+- 四张卡：折叠收益（省下的 token、摘要保留率）、召回成本、重要消息成本、净收益。
+- 每轮收支条形图：中间是零轴，右侧绿条是折叠省下的 token，左侧红条是这一轮召回与重要消息的开销。
+- 折叠明细表：编号、轮次、原文字数、摘要字数、省下 token、被召回次数。召回次数偏高的段就该用 `fold_pin` 固化。
+- 重要消息列表：永不折叠、一直占着上下文的那几条。
+
+估算口径与宿主 token-meter 一致：每 4 字符算 1 token，每个文本块再加 4 token；页脚写明该口径。旧记录缺轮次或大小字段时按字面量估算，并在界面上标记。
+
+数据只来自 `fold-store` 的记录，不需要把会话拉起来；`/fold-stats` 只接受 `GET`/`HEAD`，缺 `session` 参数返回 400。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响。
+
 ## 已知限制
 
 - 召回文本按会话存在 `$DSH_HOME/fold-store/`：分叉出来的新会话读不到父会话的载荷，召回会返回「找不到」。
@@ -86,4 +99,6 @@ npm test              # node --test，跑 tests/ 下全部 *.test.js
 node tests/units.test.js
 node tests/host.test.js
 node tests/inspect.test.js
+node tests/stats.test.js
+node tests/web.test.js
 ```
