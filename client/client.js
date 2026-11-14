@@ -358,7 +358,12 @@ window.__ModuleLoader__.load({
       if (!cal || !cal.coveredTurns) {
         return text + '；还没有 provider 回报，校准系数按 1 计，估算可能偏高'
       }
-      return text + '；按 ' + cal.coveredTurns + ' 轮回报反推校准：提示词 ×' + Number(cal.promptScale).toFixed(2) + '、输出 ×' + Number(cal.outputScale).toFixed(2)
+      text += '；按 ' + cal.coveredTurns + ' 轮回报反推校准：提示词 ×' + Number(cal.promptScale).toFixed(2) + '、输出 ×' + Number(cal.outputScale).toFixed(2)
+      // 被夹断说明模型本身偏了：把没夹断的系数写出来，免得把「模型错了」看成「刚好没超」。
+      if (cal.promptScaleClamped) {
+        text += '（夹断前 ×' + Number(cal.rawPromptScale).toFixed(2) + '，超出安全区间；先查模型口径，不要靠这个夹断值解释账单）'
+      }
+      return text
     }
 
     // 未命中口径：不按重发量等比例放大，只补轮边界上那条回复。
@@ -370,6 +375,17 @@ window.__ModuleLoader__.load({
         text += '；不折叠只多出每轮边界上那条回复，累计 ' + formatTokens(boundary) + ' token'
       }
       return text + '。'
+    }
+
+    // 折叠视角的重放量应该≈ provider 实测（同一份历史在每一步被重发），对不上就直接写差多少。
+    function estimateVsActualNote(totals) {
+      var actual = (totals && totals.actualPromptTokens) || 0
+      var folded = (totals && totals.foldedTokens) || 0
+      if (!actual || !folded) return ''
+      var diff = folded / actual - 1
+      var text = '折叠视角重放 ' + formatTokens(folded) + ' token，provider 实测 ' + formatTokens(actual) + ' token'
+      if (Math.abs(diff) <= 0.1) return text + '；两者一致（差 ' + percent(Math.abs(diff)) + '）。'
+      return text + '；估算' + (diff > 0 ? '偏高' : '偏低') + ' ' + percent(Math.abs(diff)) + '。'
     }
 
     function CostSection(props) {
@@ -491,13 +507,8 @@ window.__ModuleLoader__.load({
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, calibrationNote(cost)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, costDriftNote(cost.drift)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, missNote(totals)),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。检查点按未命中计，命中从上一个切点算起。'),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '未命中按「每步新追加的内容」计，两种视角共用同一份：不折叠只多出每轮边界上那条回复（本会话累计 ' + formatTokens(totals.unfoldedBoundaryTokens || 0) + ' token），不随上下文体积放大。'),
-
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '未命中不随上下文体积放大：每步真正没命中的只是那一步新写进历史的内容，两种视角一模一样；不折叠只多付每轮边界的回复原文（共 ' + formatTokens(totals.unfoldedBoundaryTokens || 0) + ' token），折叠只付摘要。体积差落在命中的前缀里。'),
-        // 未命中这一行最容易被误读成「体积越小未命中越少」，这里把差从哪来说清楚：
-        // 两种视角每步的新内容是一样的，差的只是轮边界（摘要 vs 上一轮回复原文）。
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '未命中按「每步新追加的内容」估，两种视角共用同一份；不折叠比折叠多出来的未命中只是每轮边界上那条回复，本次累计 ' + formatTokens(totals.unfoldedBoundaryTokens || 0) + ' token（折叠视角这里发的是摘要）。'),
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。'),
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, estimateVsActualNote(totals)),
         h('div', { style: Object.assign({}, C.sub, { margin: '10px 0 4px' }) }, '按类别拆分（估算）'),
         h('div', { style: { maxHeight: '260px', overflowY: 'auto' } },
           h('table', { style: C.table },

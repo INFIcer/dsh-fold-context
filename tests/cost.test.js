@@ -52,20 +52,43 @@ test('命中率为 0 时折叠视角的前缀全部按未命中计价', () => {
   ]
   const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 0 } })
   const row = cost.turns[0]
-  // 本轮请求里的内容 = 1200 - 200 = 1000 字；系统提示 4000 字是上一轮之后写入的，也算未命中。
-  const added = estimateChars(1000)
-  const fresh = estimateChars(4000)
-  // 本轮的重发只有上一轮的检查点（这里就是系统提示）：3 步里发 3 次，
-  // 首次按未命中、其后 2 次进拆档部分；命中率为 0 时它们同样按未命中计价。
-  const resend = 2 * fresh
+  // 折叠发生在轮末：本轮 3 步请求里真正在上下文里的是原文 60000 字，
+  // 不是折叠后剩下的 1200 字（那只是用户原话 + 摘要）。
+  const live = estimateChars(60000)
   assert.equal(row.foldedHitTokens, 0)
-  assert.equal(row.foldedInputTokens, resend + added + fresh)
-  assert.equal(row.foldedTokens, 2 * fresh + added + fresh)
-  // 不折叠视角的整体体积照旧：系统提示 4000 字每步一次，原文 60000 字平均半步。
-  assert.equal(row.unfoldedTokens, resendOf(3, 4000, 60000) + estimateChars(60000))
-  // 未命中不按体积再折一遍：两种视角每步的新增内容一样，没上一轮就没有轮边界差。
+  // 系统提示每步重发 + 原文按平均半步重发，都要付一次首次上行。
+  assert.equal(row.foldedInputTokens, resendOf(3, 4000, 60000) + live)
+  assert.equal(row.foldedTokens, row.foldedInputTokens)
+  // 第一轮没有被折叠改写的历史：两种视角一模一样，省 0。
+  assert.equal(row.unfoldedTokens, resendOf(3, 4000, 60000) + live)
   assert.equal(row.unfoldedInputTokens, row.foldedInputTokens)
-  assert.equal(row.netSavedTokens, row.unfoldedTokens - row.foldedTokens)
+  assert.equal(row.netSavedTokens, 0)
+})
+
+test('轮内原文按 unfoldedChars 参与重放，不会小两个数量级', () => {
+  // 折叠轮的 chars 只剩用户原话 + 摘要；轮内真正在上下文里的是被折掉的原文。
+  // 早先按 chars - checkpointChars 算，重放量只有实测账单的 1/120。
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 40, chars: 500, checkpointChars: 300, unfoldedChars: 200000 }),
+  ]
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 0.95 } })
+  const row = cost.turns[0]
+  assert.equal(row.liveChars, 200000)
+  assert.equal(row.liveTokens, estimateChars(200000))
+  // 40 步里原文从 0 长到 200000 字：平均半步重发，加首次上行。
+  assert.equal(row.foldedTokens, 40 * estimateChars(4000) + estimateChars(200000) * 20.5)
+})
+
+test('当前系统提示从第一个请求起计入，不按它在消息流里的位置', () => {
+  const groups = [
+    turn({ turn: 1, steps: 1, chars: 400, checkpointChars: 400, unfoldedChars: 4000 }),
+    { kind: 'system', chars: 6000 },
+    turn({ turn: 2, steps: 1, chars: 300, checkpointChars: 300, unfoldedChars: 3000 }),
+  ]
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 1 } })
+  // 第一轮第一步就带着系统提示：它不在消息流的开头，但每个请求都有它。
+  assert.equal(cost.turns[0].foldedTokens, estimateChars(6000) + estimateChars(4000))
 })
 
 test('不折叠视角的未命中只比折叠视角多出轮边界那条回复', () => {
@@ -110,9 +133,11 @@ test('命中率为 1 时前缀按命中价、且按步数重复计费', () => {
   ]
   const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 1 } })
   const row = cost.turns[1]
-  // 前缀 = 系统提示 + 上一次请求之后写入的历史（第 1 轮折叠后只剩 0 字检查点）。
-  assert.equal(row.foldedTokens, 4 * estimateChars(5000))
-  assert.equal(row.foldedInputTokens, 0)
+  // 前缀 = 系统提示 4000 + 第 1 轮折叠后留下的原文 1000 字；第 2 轮轮内原文 8000 字
+  // 从第一步起就在上下文里（平均半步重发）。命中率为 1 时重发全部按缓存价。
+  assert.equal(row.foldedHitTokens, 4 * estimateChars(5000) + estimateChars(8000) * 1.5)
+  assert.equal(row.foldedInputTokens, estimateChars(8000))
+  assert.equal(row.foldedTokens, row.foldedHitTokens + row.foldedInputTokens)
 })
 
 test('没折叠的短回合整段仍算新内容，不进命中前缀', () => {
@@ -123,8 +148,12 @@ test('没折叠的短回合整段仍算新内容，不进命中前缀', () => {
   ]
   const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 0 } })
   const row = cost.turns[1]
-  // 本轮两步都要重发上一轮那 900 字：首请求未命中，第二次在命中率为 0 时仍按未命中计。
-  assert.equal(row.foldedTokens, 2 * estimateChars(4000) + 2 * estimateChars(900))
+  // 本轮两步都要重发上一轮那 900 字（含首请求），以及本轮轮内原文 5000 字
+  // （首次上行 + 平均半步重发）。命中率为 0 时全部按未命中计。
+  assert.equal(
+    row.foldedTokens,
+    2 * estimateChars(4000) + 2 * estimateChars(900) + estimateChars(5000) * 1.5,
+  )
 })
 
 test('上一轮检查点的后续重发也计入折叠视角', () => {
@@ -135,10 +164,14 @@ test('上一轮检查点的后续重发也计入折叠视角', () => {
   ]
   const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 1 } })
   const row = cost.turns[1]
-  // 第 1 轮的检查点在第二轮的 3 步里都在：首次未命中 + 2 次按命中价重发。
+  // 第 1 轮的检查点在第二轮的 3 步里都在：首次未命中 + 2 次按命中价重发；
+  // 第 2 轮自己的原文 3000 字同样从生成那一步起重发。
   assert.equal(row.freshTokens, estimateChars(400))
-  assert.equal(row.foldedHitTokens, 3 * estimateChars(4000) + 2 * estimateChars(400))
-  assert.equal(row.foldedInputTokens, estimateChars(400))
+  assert.equal(
+    row.foldedHitTokens,
+    3 * estimateChars(4000) + 2 * estimateChars(400) + estimateChars(3000),
+  )
+  assert.equal(row.foldedInputTokens, estimateChars(3000) + estimateChars(400))
 })
 
 test('旧记录缺 unfoldedChars 时反事实不塌成 0', () => {
@@ -216,7 +249,9 @@ test('只有最后一条系统提示计入开销，旧版副本不计', () => {
   ]
   const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 0 } })
   const row = cost.turns[0]
-  assert.equal(row.foldedTokens, estimateChars(800) + estimateChars(6000))
+  // 当前版本 6000 字从第一个请求起就在；旧版 4000 字不再重复计。
+  // 本轮轮内原文是 5000 字（折叠后留下的 1000 字只是轮末的组）。
+  assert.equal(row.foldedTokens, estimateChars(6000) + estimateChars(5000))
 })
 
 test('drift 给出会话历史估算与 provider 实测的对照', () => {
@@ -281,7 +316,8 @@ test('没有回报时按配置的命中率，金额按三档单价结算', () =>
   )
   assert.equal(cost.totals.foldedMoney, expected)
   assert.equal(cost.totals.netSavedMoney, roundMoney(cost.totals.unfoldedMoney - cost.totals.foldedMoney))
-  assert.ok(cost.totals.netSavedMoney > 0)
+  // 只有一轮时折叠省不到东西：轮内内容两种视角一样，摘要要到下一轮才取代原文。
+  assert.equal(cost.totals.netSavedMoney, 0)
   // 行金额逐项可复核；行用未取整 token 算，与整数 token 的差不到一分钱。
   const row = cost.turns[0]
   const rowExpected = roundMoney(
