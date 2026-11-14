@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { buildNote, isKeeper, recallItems, statsOf, totalChars } from '../lib/fold-text.js'
+import { buildNote, filesOfToolCall, isKeeper, noteFilesLine, recallItems, shortPath, statsOf, totalChars } from '../lib/fold-text.js'
 import { planSegments } from '../lib/plan.js'
 import { foldTurn, publishPin } from '../lib/commit.js'
 import { FoldStore, safeFileName } from '../lib/store.js'
@@ -20,6 +20,12 @@ import {
 } from '../lib/config.js'
 import { promptSection, systemPromptText } from '../lib/prompt.js'
 import { blendedInputPrice, moneyOf, pricesOf, roundMoney, yuanOf } from '../lib/pricing.js'
+import {
+  matchFoldPartNumbers,
+  normalizeQuery,
+  renderSearchResults,
+  searchFolds,
+} from '../lib/recall.js'
 import { recallReminder, registerTools } from '../lib/tools.js'
 import { TurnTracker } from '../lib/turn-tracker.js'
 import { FakeSession, assistantNode, eventOf, makeCtx, toolNode, userNode } from './fakes.js'
@@ -498,5 +504,157 @@ test('fold_config 支持 get/set/reset，并拒绝非法键', async () => {
   assert.equal(reset.ok, true)
   assert.equal(configStore.get().noteRatio, 0.1)
   assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).noteRatio, 0.1)
+})
+
+test('statsOf 记下改过与读过的文件', () => {
+  const nodes = [
+    assistantNode(2, {
+      reasoning: '想',
+      text: '答',
+      calls: [
+        { id: 'c1', name: 'read', args: { file_path: 'E:/repo/lib/web.js' } },
+        { id: 'c2', name: 'edit', args: { file_path: 'E:/repo/lib/turns.js' } },
+        { id: 'c3', name: 'run_code', args: { code: 'const p = "E:/repo/tests/units.test.js"' } },
+      ],
+    }),
+    toolNode(3, 'c1', 'x'.repeat(400)),
+  ]
+  const stats = statsOf(nodes)
+  assert.deepEqual(stats.files.changed, ['E:/repo/lib/turns.js'])
+  // run_code 的代码里扫到的路径算「读过」：它也可能在写，但摘要不替模型下结论。
+  assert.deepEqual(stats.files.read, ['E:/repo/lib/web.js', 'E:/repo/tests/units.test.js'])
+  // 同一文件既读又写时，只出现在「改过」里。
+  const both = filesOfToolCall({ name: 'read', arguments: JSON.stringify({ path: 'E:/repo/lib/turns.js' }) })
+  assert.deepEqual(both.read, ['E:/repo/lib/turns.js'])
+})
+
+test('noteFilesLine 用短路径拼一行，读过的去掉已改过的', () => {
+  assert.equal(shortPath('E:/大肥鱼的窝/x/lib/tools.js'), 'lib/tools.js')
+  assert.equal(noteFilesLine({ changed: [], read: [] }), '')
+  const line = noteFilesLine({
+    changed: ['E:/repo/lib/turns.js'],
+    read: ['E:/repo/lib/turns.js', 'E:/repo/lib/web.js', 'E:/repo/lib/a.js', 'E:/repo/lib/b.js', 'E:/repo/lib/c.js'],
+  })
+  assert.equal(line, '· 文件：改过 lib/turns.js；读过 lib/web.js、lib/a.js、lib/b.js、lib/c.js')
+  const manyRead = noteFilesLine({
+    changed: [],
+    read: ['E:/r/a/1.js', 'E:/r/a/2.js', 'E:/r/a/3.js', 'E:/r/a/4.js', 'E:/r/a/5.js', 'E:/r/a/6.js'],
+  })
+  assert.ok(manyRead.includes('等 6 个'), manyRead)
+  const many = noteFilesLine({
+    changed: ['E:/r/a/1.js', 'E:/r/a/2.js', 'E:/r/a/3.js', 'E:/r/a/4.js'],
+    read: [],
+  })
+  assert.ok(many.includes('等 4 个'), many)
+})
+
+test('buildNote 带上文件行，且在预算内优先保住它', () => {
+  const stats = statsOf([
+    assistantNode(2, {
+      reasoning: 'r'.repeat(400),
+      text: 'y'.repeat(400),
+      calls: [{ id: 'c1', name: 'read', args: { file_path: 'E:/repo/lib/web.js' } }],
+    }),
+  ])
+  const note = buildNote({ foldId: 'f9', turn: 9, stats, maxChars: 600, toolName: 'fold_recall' })
+  assert.ok(note.includes('· 文件：读过 lib/web.js'), note)
+})
+
+function foldRecord(id, turn, items) {
+  return { kind: 'fold', id, turn, at: 1, startSeq: 1, endSeq: 2, chars: 100, note: '', items }
+}
+
+const SEARCH_RECORDS = [
+  foldRecord('f2', 2, [
+    { seq: 10, text: '[思考] 先看看 lib/store.js 怎么写\n[调用 read] {"file_path":"E:/dsh-fold-plugin/lib/store.js"}' },
+    { seq: 11, text: '[工具结果] 读到了，record 用 jsonl' },
+  ]),
+  foldRecord('f5', 5, [
+    { seq: 20, text: '[思考] 修 router\n[调用 edit] {"file_path":"E:/dsh-fold-plugin/lib/web.js"}' },
+    { seq: 21, text: '[工具结果] register({kind:"exact", path}) 已生效' },
+  ]),
+]
+
+test('normalizeQuery 小写、切词、去重、限长', () => {
+  assert.deepEqual(normalizeQuery('  Lib/Web.js,  Router  router  '), ['lib/web.js', 'router'])
+  assert.deepEqual(normalizeQuery('a b c d e f g h i j'), ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])
+  assert.deepEqual(normalizeQuery(undefined), [])
+})
+
+test('searchFolds 按关键词命中段，最近的折叠在前', () => {
+  const found = searchFolds(SEARCH_RECORDS, 'lib/web.js')
+  assert.equal(found.results.length, 1)
+  assert.equal(found.results[0].id, 'f5')
+  assert.equal(found.results[0].totalParts, 3)
+  assert.ok(found.results[0].matched.length >= 1)
+  assert.ok(found.results[0].matched[0].snippet.includes('web.js'))
+
+  // 多个词是 AND：只有同时出现才算命中。
+  assert.equal(searchFolds(SEARCH_RECORDS, 'lib/web.js 不存在的东西').results.length, 0)
+  // 调用名也参与匹配。
+  const byCall = searchFolds(SEARCH_RECORDS, 'edit')
+  assert.equal(byCall.results[0].id, 'f5')
+  // 大小写不敏感。
+  assert.equal(searchFolds(SEARCH_RECORDS, 'LIB/WEB.JS').results.length, 1)
+})
+
+test('renderSearchResults 只给编号与段号，不给原文', () => {
+  const found = searchFolds(SEARCH_RECORDS, 'lib/web.js')
+  const text = renderSearchResults('lib/web.js', found, { maxChars: 4000 })
+  assert.ok(text.includes('检索「lib/web.js」'), text)
+  assert.ok(text.includes('f5'), text)
+  assert.ok(text.includes('取回原文：fold_recall({id:"f5"'), text)
+  assert.ok(text.includes('不算一次召回'), text)
+  assert.ok(!text.includes('exact'), '检索结果不能贴原文')
+
+  const miss = renderSearchResults('没有命中', searchFolds(SEARCH_RECORDS, '没命中'), {})
+  assert.ok(miss.includes('没有命中'), miss)
+})
+
+test('matchFoldPartNumbers 只在一条折叠里筛段', () => {
+  const numbers = matchFoldPartNumbers(SEARCH_RECORDS[1], normalizeQuery('register'))
+  assert.deepEqual(numbers, [3])
+  assert.deepEqual(matchFoldPartNumbers(SEARCH_RECORDS[1], []), [])
+})
+
+test('fold_recall 用 query 检索，且不增加召回次数', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const store = new FoldStore({ homeDir, sessionId: 'session-search' })
+  for (const record of SEARCH_RECORDS) store.append(record)
+  const session = new FakeSession('session-search')
+  const ctx = makeCtx()
+  registerTools({
+    ctx,
+    getStore: () => store,
+    getConfig: () => defaultConfig(),
+    resolveSession: () => session,
+    getTurn: () => 6,
+    log: silent,
+    homeDir,
+  })
+  const tool = ctx.registrations.find((item) => item.name === 'fold_recall')
+  assert.ok(tool, 'fold_recall 应当已注册')
+
+  const found = await tool.execute({ query: 'lib/web.js' }, {})
+  assert.equal(found.ok, true)
+  assert.equal(found.mode, 'search')
+  assert.ok(found.text.includes('f5'), found.text)
+  assert.equal(store.recallCount('f5'), 0, '检索不算召回')
+
+  const badPart = await tool.execute({ id: 'f5', parts: ['9'] }, {})
+  assert.equal(badPart.ok, false)
+  assert.ok(badPart.text.includes('没有匹配的段'), badPart.text)
+
+  // 编号 + 关键词：只取命中段。
+  const filtered = await tool.execute({ id: 'f5', query: 'register' }, {})
+  assert.equal(filtered.ok, true)
+  assert.equal(filtered.mode, 'parts')
+  assert.ok(filtered.text.includes('#3'), filtered.text)
+  assert.ok(!filtered.text.includes('#1 '), filtered.text)
+  assert.equal(store.recallCount('f5'), 1, '取回原文才算一次召回')
+
+  const empty = await tool.execute({}, {})
+  assert.equal(empty.ok, false)
+  assert.ok(empty.text.includes('query'), empty.text)
 })
 

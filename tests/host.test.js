@@ -235,3 +235,60 @@ test('fold_config 拒绝未知键，get 里能看到分级召回的字段', asyn
   assert.equal(bad.ok, false)
   api.stop()
 })
+
+test('折叠摘要带文件清单，关键词检索能把这一轮找回来', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-files')
+  session.seed([userNode(1, '改一下路由', 'user')])
+
+  emit(ctx, session, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+  emit(ctx, session, { type: 'step/start', seq: 3, data: { turn: 1, step: 1 } })
+  emitSurface(ctx, session, userNode(4, '改一下路由', 'user'))
+  emitSurface(
+    ctx,
+    session,
+    assistantNode(5, {
+      reasoning: '先读一遍路由表'.repeat(200),
+      text: '改好了'.repeat(60),
+      calls: [
+        { id: 'c1', name: 'read', args: { file_path: 'E:/dsh-fold-plugin/lib/web.js' } },
+        { id: 'c2', name: 'edit', args: { file_path: 'E:/dsh-fold-plugin/lib/web.js' } },
+      ],
+    }),
+  )
+  emitSurface(ctx, session, toolNode(6, 'c1', '路由表原文'.repeat(200)))
+  emitSurface(ctx, session, toolNode(7, 'c2', '已写入'.repeat(200)))
+  emit(ctx, session, { type: 'step/end', seq: 8, data: { turn: 1, step: 1 } })
+  emit(ctx, session, { type: 'turn/end', seq: 9, data: { turn: 1, reason: { kind: 'stop' } } })
+  await tick()
+
+  const checkpoint = checkpointOf(session)
+  assert.ok(checkpoint, '应当生成检查点消息')
+  const note = checkpoint.data.content[0].text
+  assert.ok(note.includes('· 文件：改过 lib/web.js'), note)
+  assert.ok(!note.includes('读过 lib/web.js'), '改过的文件不该同时算作「读过」')
+
+  const tool = toolNamed(ctx, 'fold_recall')
+  // 只记得文件名：先检索，只拿到编号与段号。
+  const found = await tool.execute({ query: 'lib/web.js' }, { agent: { session } })
+  assert.equal(found.ok, true)
+  assert.equal(found.mode, 'search')
+  assert.ok(found.text.includes('f1'), found.text)
+
+  assert.match(found.text, /#\d+/)
+  // 再按编号 + 关键词筛段取原文：只取回命中的工具结果。
+  const parts = await tool.execute({ id: 'f1', query: '路由表原文' }, { agent: { session } })
+  assert.equal(parts.ok, true)
+  assert.equal(parts.mode, 'parts')
+  assert.ok(parts.text.includes('路由表原文'), parts.text)
+  assert.ok(!parts.text.includes('--- #1 思考 ---'), parts.text)
+
+  const lines = readFileSync(join(homeDir, 'fold-store', 'sess-files.jsonl'), 'utf8').split('\n').filter(Boolean)
+  const recalls = lines.map((line) => JSON.parse(line)).filter((row) => row.kind === 'recall')
+  assert.deepEqual(recalls.map((row) => row.mode), ['search', 'parts'])
+  assert.equal(recalls[0].id, '')
+  api.stop()
+})
+
