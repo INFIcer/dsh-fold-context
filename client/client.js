@@ -130,13 +130,15 @@ window.__ModuleLoader__.load({
       diffAdd: { background: 'rgba(52,211,153,.14)' },
       diffDel: { background: 'rgba(248,113,113,.14)' },
       diffFull: { marginTop: '8px' },
-      compBar: { display: 'flex', width: '100%', height: '14px', borderRadius: '4px', overflow: 'hidden', background: 'rgba(128,128,128,.14)' },
+      compBar: { display: 'flex', width: '100%', height: '8px', borderRadius: '3px', overflow: 'hidden', background: 'rgba(128,128,128,.14)' },
       compSeg: { height: '100%' },
-      compLegend: { display: 'grid', gridTemplateColumns: 'minmax(120px, 1fr) auto auto', gap: '4px 14px', fontSize: '12px', alignItems: 'center' },
-      compCell: { fontVariantNumeric: 'tabular-nums', textAlign: 'right' },
-      compName: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px' },
+      compLine: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', marginTop: '6px' },
+      compLineLabel: { width: '44px', flex: '0 0 44px', opacity: 0.6 },
+      compLineValue: { flex: '0 0 auto', fontVariantNumeric: 'tabular-nums', minWidth: '70px', textAlign: 'right' },
+      compGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '2px 18px', marginTop: '10px' },
+      compItem: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', lineHeight: '20px', minWidth: '0' },
+      compCell: { fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: '44px' },
       compNote: { fontSize: '11px', opacity: 0.6, lineHeight: '18px' },
-      chart: { width: '100%', height: 'auto', display: 'block' },
       toggleOn: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.5)', background: 'rgba(128,128,128,.18)', color: 'inherit', cursor: 'pointer', fontWeight: 600 },
       toggleOff: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.28)', background: 'transparent', color: 'inherit', cursor: 'pointer', opacity: 0.65 },
     }
@@ -523,9 +525,10 @@ window.__ModuleLoader__.load({
     }
 
     // ---------- 上下文构成（模型视角页顶部） ----------
-    // 参考宿主「上下文趋势」的堆叠面积图：横轴按块（轮次 / 系统提示词版本），纵轴 token，
-    // 颜色按用途分段。token 口径与宿主 token-meter 的基本档一致：4 字符 ≈ 1 token。
-    // 两种视角可切换：折叠后 = 模型现在看到的；不折叠 = 假设一次都没折过。
+    // 参考原生上下文面板的紧凑布局：一条占比条、可折行图例、矮趋势图。
+    // 横轴按块（轮次 / 系统提示词版本），纵轴 token；颜色按用途分段。
+    // token 口径与宿主 token-meter 的基本档一致：4 字符 ≈ 1 token。
+    // 两种视角：折叠后 = 模型现在看到的；不折叠 = 假设一次都没折过。
 
     var COMPOSITION_KEYS = ['system', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
 
@@ -570,16 +573,39 @@ window.__ModuleLoader__.load({
       return step * power
     }
 
+    var CHART_HEIGHT = 132
+
+    // 趋势图宽度跟容器走：viewBox 与像素宽一致，SVG 不再按宽度等比放大把面板撑高。
+    function useChartWidth() {
+      var ref = react.useRef(null)
+      var state = react.useState(720)
+      react.useEffect(function () {
+        var node = ref.current
+        if (!node) return
+        function measure() {
+          var next = node.clientWidth
+          if (next > 0) state[1](Math.round(next))
+        }
+        measure()
+        if (typeof ResizeObserver !== 'function') return
+        var observer = new ResizeObserver(measure)
+        observer.observe(node)
+        return function () { observer.disconnect() }
+      }, [])
+      return [ref, state[0] > 0 ? state[0] : 720]
+    }
+
     function CompositionChart(props) {
       var points = Array.isArray(props.points) ? props.points : []
       var view = props.view === 'unfolded' ? 'unfolded' : 'folded'
       var mode = props.mode === 'step' ? 'step' : 'total'
-      var width = 760
-      var height = 220
-      var padLeft = 54
-      var padRight = 14
-      var padTop = 12
-      var padBottom = 30
+      var measured = useChartWidth()
+      var width = measured[1]
+      var height = CHART_HEIGHT
+      var padLeft = 46
+      var padRight = 8
+      var padTop = 8
+      var padBottom = 22
       var count = points.length
       if (count < 2) return h('div', { style: C.compNote }, '块数不足，画不了趋势图。')
       var plotWidth = width - padLeft - padRight
@@ -611,11 +637,11 @@ window.__ModuleLoader__.load({
         return padTop + plotHeight - (plotHeight * value) / top
       }
       var grid = []
-      for (var g = 0; g <= 4; g += 1) {
-        var tick = (top * g) / 4
+      for (var g = 0; g <= 3; g += 1) {
+        var tick = (top * g) / 3
         var y = yAt(tick)
         grid.push(h('line', { key: 'g' + g, x1: padLeft, y1: y, x2: width - padRight, y2: y, stroke: 'rgba(128,128,128,.22)', strokeWidth: 1 }))
-        grid.push(h('text', { key: 't' + g, x: padLeft - 8, y: y + 3, fontSize: 10, fill: 'currentColor', opacity: 0.55, textAnchor: 'end' }, formatTokens(Math.round(tick))))
+        grid.push(h('text', { key: 't' + g, x: padLeft - 6, y: y + 3, fontSize: 10, fill: 'currentColor', opacity: 0.5, textAnchor: 'end' }, formatTokens(Math.round(tick))))
       }
       var layers = []
       for (var c = 0; c < COMPOSITION_KEYS.length; c += 1) {
@@ -642,9 +668,9 @@ window.__ModuleLoader__.load({
         d: otherPath.trim(),
         fill: 'none',
         stroke: 'currentColor',
-        strokeWidth: 1.4,
-        strokeDasharray: '6 4',
-        opacity: 0.75,
+        strokeWidth: 1.2,
+        strokeDasharray: '5 4',
+        opacity: 0.7,
       })
       // 每个块一个透明热区，鼠标停上去看这块的折叠后 / 不折叠 token 数。
       var hover = []
@@ -663,14 +689,21 @@ window.__ModuleLoader__.load({
         }, h('title', {}, (point.label || '第 ' + point.ordinal + ' 块') + ' · 折叠后 ' + formatTokens(fTokens) + ' token · 不折叠 ' + formatTokens(uTokens) + ' token')))
       }
       var labels = []
-      var every = Math.max(1, Math.ceil(count / 10))
+      var every = Math.max(1, Math.ceil(count / 8))
       for (var li = 0; li < count; li += 1) {
         if (li % every !== 0 && li !== count - 1) continue
         var label = points[li].label || ''
         if (!label) continue
-        labels.push(h('text', { key: 'l' + li, x: xAt(li), y: height - 10, fontSize: 10, fill: 'currentColor', opacity: 0.6, textAnchor: 'middle' }, label))
+        labels.push(h('text', { key: 'l' + li, x: xAt(li), y: height - 7, fontSize: 10, fill: 'currentColor', opacity: 0.55, textAnchor: 'middle' }, label))
       }
-      return h('svg', { viewBox: '0 0 ' + width + ' ' + height, style: C.chart }, grid.concat(layers, [otherLine], hover, labels))
+      return h('div', { ref: measured[0], style: { width: '100%' } },
+        h('svg', {
+          width: width,
+          height: height,
+          viewBox: '0 0 ' + width + ' ' + height,
+          style: { width: '100%', height: height + 'px', display: 'block' },
+        }, grid.concat(layers, [otherLine], hover, labels))
+      )
     }
 
     function CompositionPanel(props) {
@@ -688,77 +721,79 @@ window.__ModuleLoader__.load({
       var view = viewState[0]
       var mode = modeState[0]
 
-      function bar(bucket, total) {
-        return h('div', { style: C.compBar }, categories.map(function (category) {
-          var value = bucket[category.key] || 0
-          if (!(value > 0)) return null
-          return h('div', {
-            key: category.key,
-            title: category.label + ' ' + formatChars(value),
-            style: Object.assign({}, C.compSeg, {
-              width: (100 * value / (total || 1)) + '%',
-              background: compositionColor(category.key),
-            }),
-          })
-        }))
+      function tokensOf(chars) {
+        return Math.round((chars || 0) / 4)
       }
 
-      function line(label, bucket, total) {
-        return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
-          h('div', { style: C.sub }, label + ' · ' + formatChars(total) + ' ≈ ' + formatTokens(Math.round(total / 4)) + ' token'),
-          bar(bucket, total)
+      function barLine(label, bucket, total) {
+        return h('div', { style: C.compLine },
+          h('span', { style: C.compLineLabel }, label),
+          h('div', { style: Object.assign({}, C.compBar, { flex: '1 1 0' }) }, categories.map(function (category) {
+            var value = bucket[category.key] || 0
+            if (!(value > 0)) return null
+            return h('div', {
+              key: category.key,
+              title: category.label + ' ' + formatChars(value) + ' ≈ ' + formatTokens(tokensOf(value)) + ' token',
+              style: Object.assign({}, C.compSeg, {
+                width: (100 * value / (total || 1)) + '%',
+                background: compositionColor(category.key),
+              }),
+            })
+          })),
+          h('span', { style: C.compLineValue }, formatTokens(tokensOf(total)) + ' token')
         )
       }
 
-      var head = h('div', { key: 'head', style: { display: 'contents' } },
-        h('div', { style: C.sub }, '类别'),
-        h('div', { style: Object.assign({}, C.compCell, C.sub) }, '折叠后'),
-        h('div', { style: Object.assign({}, C.compCell, C.sub) }, '不折叠')
-      )
-      var rows = [head]
-      for (var i = 0; i < categories.length; i += 1) {
-        var category = categories[i]
+      var legend = categories.map(function (category) {
         var f = folded[category.key] || 0
         var u = unfolded[category.key] || 0
-        rows.push(h('div', { key: 'r' + category.key, style: { display: 'contents' } },
-          h('div', { style: C.compName },
-            h('span', { style: Object.assign({}, C.dot, { background: compositionColor(category.key) }) }),
-            category.label
-          ),
-          h('div', { style: C.compCell }, formatChars(f)),
-          h('div', { style: C.compCell }, formatChars(u))
-        ))
-      }
-      rows.push(h('div', { key: 'sum', style: { display: 'contents' } },
-        h('div', { style: { fontSize: '12px', fontWeight: 600 } }, '合计'),
-        h('div', { style: Object.assign({}, C.compCell, { fontWeight: 600 }) }, formatChars(foldedTotal)),
-        h('div', { style: Object.assign({}, C.compCell, { fontWeight: 600 }) }, formatChars(unfoldedTotal))
-      ))
+        return h('div', {
+          key: category.key,
+          style: C.compItem,
+          title: category.label + '：折叠后 ' + formatChars(f) + ' ≈ ' + formatTokens(tokensOf(f)) + ' token；不折叠 ' + formatChars(u) + ' ≈ ' + formatTokens(tokensOf(u)) + ' token',
+        },
+          h('span', { style: Object.assign({}, C.dot, { background: compositionColor(category.key) }) }),
+          h('span', { style: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, category.label),
+          h('span', { style: C.compCell }, formatTokens(tokensOf(f))),
+          h('span', { style: Object.assign({}, C.compCell, { opacity: 0.55 }) }, formatTokens(tokensOf(u)))
+        )
+      })
 
       function toggle(label, active, onClick) {
         return h('button', { style: active ? C.toggleOn : C.toggleOff, onClick: onClick }, label)
       }
-      var viewToggle = h('div', { style: C.row },
-        toggle('折叠后', view === 'folded', function () { viewState[1]('folded') }),
-        toggle('不折叠', view === 'unfolded', function () { viewState[1]('unfolded') }),
-        h('div', { style: { width: '12px' } }),
-        toggle('总量', mode === 'total', function () { modeState[1]('total') }),
-        toggle('每块增量', mode === 'step', function () { modeState[1]('step') })
-      )
 
-      return h('div', { style: C.section },
-        h('div', { style: C.sectionHead },
-          h('div', { style: C.sectionTitle }, '上下文构成'),
-          h('div', { style: C.sub }, '按用途分类，token 按 4 字符 1 token 估算')
+      var saveRate = foldedTotal > 0 ? 1 - foldedTotal / (unfoldedTotal || 1) : 0
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+        h('div', { style: C.section },
+          h('div', { style: C.sectionHead },
+            h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' } },
+              h('div', { style: C.sectionTitle }, '上下文构成'),
+              h('div', { style: C.sub }, '折叠后 ' + formatTokens(tokensOf(foldedTotal)) + ' token · 不折叠 ' + formatTokens(tokensOf(unfoldedTotal)) + ' · 省 ' + percent(saveRate))
+            ),
+            h('div', { style: C.sub }, '按用途分类；图例数值为「折叠后 / 不折叠」')
+          ),
+          barLine('折叠后', folded, foldedTotal),
+          barLine('不折叠', unfolded, unfoldedTotal),
+          h('div', { style: C.compGrid }, legend)
         ),
-        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px' } },
-          line('折叠后（模型现在看到的）', folded, foldedTotal),
-          line('不折叠（假设全部展开）', unfolded, unfoldedTotal)
-        ),
-        h('div', { style: C.compLegend }, rows),
-        h('div', { style: { marginTop: '12px' } }, viewToggle),
-        h('div', { style: { marginTop: '10px' } }, h(CompositionChart, { points: points, view: view, mode: mode })),
-        h('div', { style: Object.assign({}, C.compNote, { marginTop: '6px' }) }, '横轴每格是一块历史：T = 轮次，S = 系统提示词版本；面积是当前视角，虚线是另一视角的总量，两者共用纵轴，两条线的差就是折叠省下的量。')
+        h('div', { style: C.section },
+          h('div', { style: C.sectionHead },
+            h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' } },
+              h('div', { style: C.sectionTitle }, '上下文趋势'),
+              h('div', { style: C.sub }, '虚线是不折叠视角')
+            ),
+            h('div', { style: C.row },
+              toggle('折叠后', view === 'folded', function () { viewState[1]('folded') }),
+              toggle('不折叠', view === 'unfolded', function () { viewState[1]('unfolded') }),
+              h('span', { style: { width: '6px' } }),
+              toggle('总量', mode === 'total', function () { modeState[1]('total') }),
+              toggle('每块增量', mode === 'step', function () { modeState[1]('step') })
+            )
+          ),
+          h(CompositionChart, { points: points, view: view, mode: mode }),
+          h('div', { style: Object.assign({}, C.compNote, { marginTop: '4px' }) }, '横轴每格是一块历史：T = 轮次，S = 系统提示词版本；面积按当前视角累加，两条线的差就是折叠省下的量。')
+        )
       )
     }
 
