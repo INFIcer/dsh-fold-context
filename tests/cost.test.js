@@ -45,7 +45,7 @@ test('buildCost 对折叠历史算出的开销低于不折叠', () => {
   assert.equal(cost.calibration.promptScale, 1)
 })
 
-test('命中率为 0 时前缀全部按未命中计价', () => {
+test('命中率为 0 时折叠视角的前缀全部按未命中计价', () => {
   const groups = [
     { kind: 'system', chars: 4000 },
     turn({ turn: 1, steps: 3, chars: 1200, checkpointChars: 200, unfoldedChars: 60000 }),
@@ -59,9 +59,45 @@ test('命中率为 0 时前缀全部按未命中计价', () => {
   assert.equal(row.foldedHitTokens, 0)
   assert.equal(row.foldedInputTokens, resend + added + fresh)
   assert.equal(row.foldedTokens, 2 * added + fresh)
-  // 不折叠视角同样要重发前缀：系统提示 4000 字每步一次，原文 60000 字平均半步。
+  // 不折叠视角的整体体积照旧：系统提示 4000 字每步一次，原文 60000 字平均半步。
   assert.equal(row.unfoldedTokens, resendOf(3, 4000, 60000) + estimateChars(60000))
+  // 未命中不按体积再折一遍：两种视角每步的新增内容一样，没上一轮就没有轮边界差。
+  assert.equal(row.unfoldedInputTokens, row.foldedInputTokens)
   assert.equal(row.netSavedTokens, row.unfoldedTokens - row.foldedTokens)
+})
+
+test('不折叠视角的未命中只比折叠视角多出轮边界那条回复', () => {
+  // 第一轮长回复 800 字、折成 200 字摘要；第二轮原样。
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 3, chars: 1200, checkpointChars: 200, unfoldedChars: 60000, outputChars: 800 }),
+    turn({ turn: 2, steps: 2, chars: 400, checkpointChars: 400, unfoldedChars: 8000, outputChars: 100 }),
+  ]
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 0.9 } })
+  const row = cost.turns[1]
+  // 差 = 上一轮回复 − 上一轮摘要：多出来的只有这条边界，跟上下文涨到多大无关。
+  assert.equal(row.boundaryDeltaTokens, estimateChars(800) - estimateChars(200))
+  assert.equal(row.unfoldedInputTokens - row.foldedInputTokens, estimateChars(800) - estimateChars(200))
+})
+
+test('上下文体积翻倍不会放大两种视角的未命中差', () => {
+  function build(prevUnfoldedChars) {
+    return buildCost({
+      groups: [
+        turn({ turn: 1, steps: 6, chars: 1200, checkpointChars: 200, unfoldedChars: prevUnfoldedChars, outputChars: 800 }),
+        turn({ turn: 2, steps: 2, chars: 400, checkpointChars: 400, unfoldedChars: 8000, outputChars: 100 }),
+      ],
+      folds: [],
+      config: { cacheHitRate: 0.9 },
+    })
+  }
+  const small = build(20000)
+  const big = build(200000)
+  const gapSmall = small.turns[1].unfoldedInputTokens - small.turns[1].foldedInputTokens
+  const gapBig = big.turns[1].unfoldedInputTokens - big.turns[1].foldedInputTokens
+  assert.equal(gapSmall, gapBig)
+  // 体积差全落在命中的前缀里：折叠后整体仍然便宜。
+  assert.ok(big.totals.netSavedTokens > small.totals.netSavedTokens)
 })
 
 test('命中率为 1 时前缀按命中价、且按步数重复计费', () => {

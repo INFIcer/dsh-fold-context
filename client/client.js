@@ -355,6 +355,17 @@ window.__ModuleLoader__.load({
       return text + '；按 ' + cal.coveredTurns + ' 轮回报反推校准：提示词 ×' + Number(cal.promptScale).toFixed(2) + '、输出 ×' + Number(cal.outputScale).toFixed(2)
     }
 
+    // 未命中口径：不按重发量等比例放大，只补轮边界上那条回复。
+    // 页面要写出来，否则「折叠后未命中比不折叠少」看着像偷了数。
+    function missNote(totals) {
+      var boundary = totals && typeof totals.unfoldedBoundaryTokens === 'number' ? totals.unfoldedBoundaryTokens : 0
+      var text = '未命中按「每步新追加的思考/回复/工具结果」计，两种视角共用同一份，不随上下文体积放大'
+      if (boundary > 0) {
+        text += '；不折叠只多出每轮边界上那条回复，累计 ' + formatTokens(boundary) + ' token'
+      }
+      return text + '。'
+    }
+
     function CostSection(props) {
       var cost = props.cost || {}
       var totals = cost.totals || {}
@@ -473,7 +484,14 @@ window.__ModuleLoader__.load({
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '金额不是收益：同一批 token 换成高峰价就翻倍，真实请求还会被缓存与请求期压缩器改写。这里只回答「这些 token 按当前单价折算是多少」；「实测」那一栏才是 provider 回报的真实计费。'),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, calibrationNote(cost)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, costDriftNote(cost.drift)),
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, missNote(totals)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。检查点按未命中计，命中从上一个切点算起。'),
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '未命中按「每步新追加的内容」计，两种视角共用同一份：不折叠只多出每轮边界上那条回复（本会话累计 ' + formatTokens(totals.unfoldedBoundaryTokens || 0) + ' token），不随上下文体积放大。'),
+
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '未命中不随上下文体积放大：每步真正没命中的只是那一步新写进历史的内容，两种视角一模一样；不折叠只多付每轮边界的回复原文（共 ' + formatTokens(totals.unfoldedBoundaryTokens || 0) + ' token），折叠只付摘要。体积差落在命中的前缀里。'),
+        // 未命中这一行最容易被误读成「体积越小未命中越少」，这里把差从哪来说清楚：
+        // 两种视角每步的新内容是一样的，差的只是轮边界（摘要 vs 上一轮回复原文）。
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '未命中按「每步新追加的内容」估，两种视角共用同一份；不折叠比折叠多出来的未命中只是每轮边界上那条回复，本次累计 ' + formatTokens(totals.unfoldedBoundaryTokens || 0) + ' token（折叠视角这里发的是摘要）。'),
         h('div', { style: Object.assign({}, C.sub, { margin: '10px 0 4px' }) }, '按类别拆分（估算）'),
         h('div', { style: { maxHeight: '260px', overflowY: 'auto' } },
           h('table', { style: C.table },
