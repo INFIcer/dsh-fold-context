@@ -141,6 +141,24 @@ test('drift 给出会话历史估算与 provider 实测的对照', () => {
   assert.equal(cost.drift.overEstimate, cost.totals.contextFoldedTokens > 1020 * 1.3)
 })
 
+test('drift 把插件生效前那一轮单列出来', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, prePlugin: true, chars: 40000, checkpointChars: 0, unfoldedChars: 40000 }),
+    turn({ turn: 2, chars: 300, checkpointChars: 300, unfoldedChars: 4000 }),
+  ]
+  const cost = buildCost({
+    groups,
+    folds: [],
+    config: { cacheHitRatio: 0.25 },
+    actual: { input: 500, cacheRead: 3500, cacheWrite: 0, output: 10, turn: 2, step: 1 },
+  })
+  // 没折过的那一轮既不归折叠管，也不该藏在「估算偏高」里，所以单列。
+  assert.equal(cost.totals.legacyTokens, estimateChars(40000))
+  assert.equal(cost.drift.legacyTokens, estimateChars(40000))
+  assert.equal(cost.drift.eraTokens, cost.drift.estimateTokens - estimateChars(40000))
+})
+
 test('normalizeLatest 把 tracker 的最近一次回报换成展示口径', () => {
   assert.equal(normalizeLatest(null), null)
   assert.equal(normalizeLatest({ input: 0, cacheRead: 0 }), null)

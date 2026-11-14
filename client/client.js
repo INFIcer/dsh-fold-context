@@ -269,10 +269,12 @@ window.__ModuleLoader__.load({
       )
       var drift = cost.drift || null
       var note = drift
-        ? '估算的会话历史约 ' + formatTokens(drift.estimateTokens) + ' token；provider 实测最近一次请求 ' + formatTokens(drift.actualPromptTokens) + ' token' +
+        ? '估算的会话历史约 ' + formatTokens(drift.estimateTokens) + ' token' +
+          (drift.legacyTokens > 0 ? '（含插件生效前那一轮约 ' + formatTokens(drift.legacyTokens) + ' token，它没被折叠）' : '') +
+          '；provider 实测最近一次请求 ' + formatTokens(drift.actualPromptTokens) + ' token。' +
           (drift.overEstimate
-            ? '（估算更高：请求期压缩器（例如 billion-context）会把历史改写得更短，估算量的是会话历史，不是真正上行的内容；省下的相对比例仍然成立）。'
-            : '（两者同向）。')
+            ? '差在两处：请求期压缩器（例如 billion-context）会把插件生效前的历史改短，而实际请求又会带上工具定义等历史之外的内容。相对比例仍成立。'
+            : '两者同向。')
         : '实际输入要等本轮有一次模型调用后才会出现。'
       var body = rows.length === 0
         ? h('div', { style: C.notice }, '还没有可估算的轮次。')
