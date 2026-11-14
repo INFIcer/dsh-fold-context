@@ -731,23 +731,95 @@ window.__ModuleLoader__.load({
       var item = props.item || {}
       var opened = useLazyOpen()
       var seq = item.seq === null || item.seq === undefined ? '?' : item.seq
-      var head = '第 ' + props.index + ' 段 · #' + seq + ' · ' + formatChars(item.chars)
+      var head = '第 ' + props.index + ' 段 · #' + seq + ' · ' + formatChars(item.chars) + ' · ≈' + formatTokens(Math.round((item.chars || 0) / 4)) + ' token'
       return h('details', { style: C.itemBox, onToggle: opened[1] },
         h('summary', { style: C.itemSummary }, head),
         opened[0] ? h('div', { style: C.itemBody }, h(BlockList, { blocks: item.blocks, wide: props.wide })) : null
       )
     }
 
-    // 被折叠掉的原文：逐段再折一层，点开一段才挂一段，212 段也不会一次进 DOM。
+    // 折叠原文按召回时的形态展示：整段够小就直接给全文，超过就先给目录（与 fold_recall 一致）。
+    function foldPartsOf(record) {
+      var items = Array.isArray(record && record.items) ? record.items : []
+      var parts = []
+      for (var i = 0; i < items.length; i += 1) {
+        var item = items[i] || {}
+        var blocks = Array.isArray(item.blocks) ? item.blocks : []
+        for (var j = 0; j < blocks.length; j += 1) {
+          var block = blocks[j] || {}
+          var text = typeof block.text === 'string' ? block.text : ''
+          parts.push({ no: parts.length + 1, seq: item.seq, kind: block.kind || 'text', name: block.name || '', text: text, chars: text.length })
+        }
+      }
+      return parts
+    }
+
+    function recallKindLabel(part) {
+      var label = BLOCK_LABELS[part.kind] || '文本'
+      if (part.kind === 'call' && part.name) label += ' ' + part.name
+      return label
+    }
+
+    function recallIndexLines(parts, previewChars) {
+      return parts.map(function (part) {
+        var flat = part.text.replace(/^\[[^\]]*\]\s*/, '').replace(/\s+/g, ' ').trim()
+        var cut = flat.length <= previewChars ? flat : flat.slice(0, Math.max(0, previewChars)) + '…'
+        return '#' + part.no + ' [' + recallKindLabel(part) + '] ' + formatChars(part.chars) + ' 字：' + (cut || '（空）')
+      })
+    }
+
+    function recallPlan(record, config) {
+      var settings = config || {}
+      var directTokens = typeof settings.recallDirectTokens === 'number' && settings.recallDirectTokens > 0 ? settings.recallDirectTokens : 2000
+      var previewTokens = typeof settings.recallIndexPreviewTokens === 'number' && settings.recallIndexPreviewTokens > 0 ? settings.recallIndexPreviewTokens : 25
+      var parts = foldPartsOf(record)
+      var chars = parts.reduce(function (sum, part) { return sum + part.chars }, 0)
+      var tokens = Math.round(chars / 4)
+      return { parts: parts, chars: chars, tokens: tokens, direct: tokens <= directTokens, directLimit: directTokens, previewChars: previewTokens * 4 }
+    }
+
+    var RECALL_LINE_STYLE = {
+      fontSize: '11px',
+      lineHeight: '16px',
+      fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-all',
+      padding: '1px 5px',
+      borderRadius: '4px',
+      background: 'rgba(127,127,127,.08)',
+    }
+
     function FoldOriginal(props) {
       var record = props.record || {}
-      var items = Array.isArray(record.items) ? record.items : []
+      var plan = recallPlan(record, props.config)
       var opened = useLazyOpen()
+      var head = '折叠掉的原文 · ' + plan.parts.length + ' 段 · 约 ' + formatTokens(plan.tokens) + ' token（' +
+        (plan.direct ? '召回时整段返回' : '召回时先给目录') + '，模型看不到）'
+      var note = plan.direct
+        ? '调用 fold_recall 时整段返回，下面就是模型能取回的原文；不需要再选段。'
+        : '原文超过直接返回上限（' + formatTokens(plan.directLimit) + ' token），召回先返回下面的分段目录，选 parts 才取回选中的段。'
+      var children = [h('div', { key: 'note', style: C.sub }, note)]
+      if (!plan.direct) {
+        var lines = recallIndexLines(plan.parts, plan.previewChars)
+        for (var li = 0; li < lines.length; li += 1) {
+          children.push(h('div', { key: 'idx' + li, style: RECALL_LINE_STYLE }, lines[li]))
+        }
+        children.push(h('div', { key: 'hint', style: C.sub }, '这些是召回时模型看到的目录行；点开下方任一段可对照原文。'))
+      } else {
+        children.push(h('div', { key: 'hint', style: C.sub }, '整段返回时模型看到的就是下方全部内容。'))
+      }
+      for (var pi = 0; pi < plan.parts.length; pi += 1) {
+        var part = plan.parts[pi]
+        children.push(h(FoldItem, {
+          key: 'i' + pi,
+          item: { seq: part.seq, chars: part.chars, blocks: [{ kind: part.kind, name: part.name, text: part.text }] },
+          index: part.no,
+          wide: props.wide,
+        }))
+      }
       return h('details', { style: C.nested, onToggle: opened[1] },
-        h('summary', { style: C.nestedSummary }, '折叠掉的原文 · ' + items.length + ' 段（模型看不到，仅供对照）'),
-        opened[0] ? h('div', { style: C.nestedBody }, items.map(function (item, index) {
-          return h(FoldItem, { key: 'i' + index, item: item, index: index + 1, wide: props.wide })
-        })) : null
+        h('summary', { style: C.nestedSummary }, head),
+        opened[0] ? h('div', { style: C.nestedBody }, children) : null
       )
     }
 
@@ -778,7 +850,7 @@ window.__ModuleLoader__.load({
         opened[0]
           ? h('div', { style: C.entryBody },
               h(BlockList, { blocks: entry.blocks, wide: props.wide }),
-              hasOriginal ? h(FoldOriginal, { record: record, wide: props.wide }) : null
+              hasOriginal ? h(FoldOriginal, { record: record, wide: props.wide, config: props.config }) : null
             )
           : null
       )
@@ -1210,12 +1282,12 @@ window.__ModuleLoader__.load({
           summary,
           opened[0]
             ? h('div', { style: C.turnBody }, rest.map(function (item, index) {
-                return h(EntryView, { key: 'e' + index, entry: item, wide: props.wide })
+                return h(EntryView, { key: 'e' + index, entry: item, wide: props.wide, config: props.config })
               }))
             : null
         ),
         pins.map(function (pin, index) {
-          return h(EntryView, { key: 'pin' + index, entry: pin, wide: props.wide })
+          return h(EntryView, { key: 'pin' + index, entry: pin, wide: props.wide, config: props.config })
         })
       )
     }
@@ -1303,7 +1375,7 @@ window.__ModuleLoader__.load({
         actualNote,
         warns.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, warns) : null,
         groups.map(function (group, index) {
-          return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0], current: index === lastSystemIndex })
+          return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0], config: data.config, current: index === lastSystemIndex })
         })
       )
     }
@@ -1531,6 +1603,10 @@ window.__ModuleLoader__.load({
       CostSection: CostSection,
       ledgerKpis: ledgerKpis,
       formatMoney: formatMoney,
+      FoldOriginal: FoldOriginal,
+      foldPartsOf: foldPartsOf,
+      recallPlan: recallPlan,
+      recallIndexLines: recallIndexLines,
     }
     return module.exports
   },

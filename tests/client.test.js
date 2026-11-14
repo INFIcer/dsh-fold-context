@@ -345,3 +345,34 @@ test('账单页写明命中率与校准来源', () => {
   const section = module.__test.CostSection({ cost: { totals: {}, turns: [] } })
   assert.ok(JSON.stringify(section).includes('命中 ¥0.02'), JSON.stringify(section).slice(0, 400))
 })
+test('折叠原文面板与召回同形：整段/目录两种形态与目录行格式', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  const record = {
+    items: [
+      { seq: 7, blocks: [
+        { kind: 'think', text: '[思考] ' + '思'.repeat(40) },
+        { kind: 'call', name: 'read', text: '[调用 read] {}' },
+        { kind: 'reply', text: '[回复] ' + '答'.repeat(30) },
+      ] },
+      { seq: 8, blocks: [{ kind: 'result', text: '[工具结果] ' + '果'.repeat(50) }] },
+    ],
+  }
+  const parts = t.foldPartsOf(record)
+  assert.equal(parts.length, 4)
+  assert.equal(parts[0].no, 1)
+  assert.equal(parts[3].no, 4)
+  assert.equal(parts[1].kind, 'call')
+
+  const small = t.recallPlan(record, { recallDirectTokens: 2000 })
+  assert.equal(small.direct, true)
+  const big = t.recallPlan(record, { recallDirectTokens: 10 })
+  assert.equal(big.direct, false)
+  assert.ok(big.tokens > 10)
+
+  const lines = t.recallIndexLines(parts, 10)
+  assert.ok(lines[0].startsWith('#1 [思考] '))
+  assert.ok(lines[0].includes('字：'))
+  assert.ok(lines[1].startsWith('#2 [调用 read] '))
+  assert.ok(lines[0].length < 60)
+})
