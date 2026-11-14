@@ -4,6 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { buildCost, normalizeLatest } from '../lib/cost.js'
+import { roundMoney } from '../lib/pricing.js'
 import { estimateChars } from '../lib/tokens.js'
 
 function turn(extra) {
@@ -176,4 +177,56 @@ test('normalizeLatest 把 tracker 的最近一次回报换成展示口径', () =
   assert.equal(latest.outputTokens, 800)
   assert.equal(latest.turn, 7)
   assert.equal(latest.at, 123)
+})
+function moneyOfParts(totals, prices) {
+  return roundMoney(
+    (totals.foldedHitTokens * prices.cacheHit + totals.foldedInputTokens * prices.input + totals.outputTokens * prices.output) / 1e6,
+  )
+}
+
+test('金额按三档单价结算：命中 + 未命中 + 输出', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 2, chars: 1200, checkpointChars: 200, unfoldedChars: 60000, outputChars: 800 }),
+    turn({ turn: 2, steps: 1, chars: 300, checkpointChars: 300, unfoldedChars: 4000, outputChars: 200 }),
+  ]
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRatio: 0.25 } })
+  // 默认价：命中 0.2、未命中 2、输出 3 元 / 百万 token。
+  assert.equal(cost.prices.cacheHit, 0.2)
+  assert.equal(cost.prices.input, 2)
+  assert.equal(cost.prices.output, 3)
+  // 输出按轮各算一次（每块 4 token 的固定开销），合计即各行之和。
+  assert.equal(cost.turns[0].outputTokens, estimateChars(800))
+  assert.equal(cost.totals.outputTokens, cost.turns.reduce((sum, row) => sum + row.outputTokens, 0))
+  assert.equal(cost.totals.foldedMoney, moneyOfParts(cost.totals, cost.prices))
+  assert.equal(cost.totals.netSavedMoney, roundMoney(cost.totals.unfoldedMoney - cost.totals.foldedMoney))
+  assert.ok(cost.totals.netSavedMoney > 0)
+  // 每一行也能逐项复核：三档金额之和 = 该行合计。
+  // 行金额用未取整的 token 算，和「整数 token × 单价」有不到一分钱的差。
+  const row = cost.turns[0]
+  const expected = roundMoney(
+    (row.foldedHitTokens * 0.2 + row.foldedInputTokens * 2 + row.outputTokens * 3) / 1e6,
+  )
+  assert.ok(Math.abs(row.foldedMoney - expected) < 1e-4)
+})
+
+test('输出价同时作用于两种视角，做差时抵消', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 2, chars: 1200, checkpointChars: 200, unfoldedChars: 60000, outputChars: 800 }),
+  ]
+  const cheap = buildCost({ groups, folds: [], config: { cacheHitRatio: 0.25, priceOutput: 1 } })
+  const dear = buildCost({ groups, folds: [], config: { cacheHitRatio: 0.25, priceOutput: 30 } })
+  assert.ok(dear.totals.foldedMoney > cheap.totals.foldedMoney)
+  assert.ok(dear.totals.unfoldedMoney > cheap.totals.unfoldedMoney)
+  // 净省只看输入侧，输出价怎么调都不该动它。
+  assert.equal(dear.totals.netSavedMoney, cheap.totals.netSavedMoney)
+})
+
+test('自定义未命中价按比例放大输入侧金额', () => {
+  const groups = [turn({ turn: 1, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 4000 })]
+  const base = buildCost({ groups, folds: [], config: { cacheHitRatio: 0 } })
+  const pricey = buildCost({ groups, folds: [], config: { cacheHitRatio: 0, priceInput: 20 } })
+  // 命中为 0 时全部走未命中价，单价 ×10，金额也应 ×10。
+  assert.ok(Math.abs(pricey.totals.foldedMoney - base.totals.foldedMoney * 10) < 1e-6)
 })

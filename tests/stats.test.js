@@ -84,5 +84,17 @@ test('没有记录时给空账本而不是报错', () => {
   assert.equal(stats.totals.folds, 0)
   assert.equal(stats.totals.netTokens, 0)
   assert.equal(stats.turns.length, 0)
-  assert.deepEqual(stats.current, { checkpointChars: 0, checkpointTokens: 0, pinChars: 0, pinTokens: 0, tokens: 0 })
+  assert.deepEqual(stats.current, {
+    checkpointChars: 0,
+    checkpointTokens: 0,
+    checkpointMoney: 0,
+    pinChars: 0,
+    pinTokens: 0,
+    pinMoney: 0,
+    tokens: 0,
+    money: 0,
+  })
+  // 空账本也要给出单价，页面不必自己兜底。
+  assert.equal(stats.pricing.prices.input, 2)
+  assert.equal(stats.pricing.cacheHitRatio, 0.25)
 })

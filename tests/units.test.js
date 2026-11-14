@@ -19,6 +19,7 @@ import {
   validateConfigPatch,
 } from '../lib/config.js'
 import { promptSection, systemPromptText } from '../lib/prompt.js'
+import { blendedInputPrice, moneyOf, pricesOf, roundMoney, yuanOf } from '../lib/pricing.js'
 import { recallReminder, registerTools } from '../lib/tools.js'
 import { TurnTracker } from '../lib/turn-tracker.js'
 import { FakeSession, assistantNode, eventOf, makeCtx, toolNode, userNode } from './fakes.js'
@@ -250,6 +251,53 @@ test('normalizeConfig 覆盖新增字段的钳制与类型守卫', () => {
   assert.equal(high.noteRatio, 0.5)
   assert.equal(high.maxNoteChars, 4000)
   assert.equal(high.promptOrder, 10000)
+})
+
+test('单价字段有默认值，越界钳制，严格校验拒绝非数字', () => {
+  const base = defaultConfig()
+  assert.equal(base.priceCacheHitInput, 0.2)
+  assert.equal(base.priceInput, 2)
+  assert.equal(base.priceOutput, 3)
+
+  const clamped = normalizeConfig({ priceOutput: 9999, priceInput: -5 })
+  assert.equal(clamped.priceOutput, 1000)
+  assert.equal(clamped.priceInput, 0)
+
+  // 单价保留六位小数，落盘时不带浮点尾巴。
+  const rounded = normalizeConfig({ priceInput: 0.123456789 })
+  assert.equal(rounded.priceInput, 0.123457)
+
+  const ok = validateConfigPatch({ priceCacheHitInput: 0.5, priceInput: 4, priceOutput: 8 })
+  assert.equal(ok.ok, true)
+  assert.equal(ok.patch.priceInput, 4)
+
+  const tooHigh = validateConfigPatch({ priceOutput: 5000 })
+  assert.equal(tooHigh.ok, false)
+  assert.ok(tooHigh.errors.join(' ').includes('0~1000'))
+
+  const notNumber = validateConfigPatch({ priceInput: '2' })
+  assert.equal(notNumber.ok, false)
+  assert.ok(notNumber.errors.join(' ').includes('必须是数字'))
+})
+
+test('pricing 用默认价兜底，金额按百万 token 折算', () => {
+  const prices = pricesOf({})
+  assert.deepEqual(prices, { cacheHit: 0.2, input: 2, output: 3 })
+  // 非法与缺项都退回默认，不让 NaN 流进金额。
+  assert.deepEqual(pricesOf({ priceInput: 'x', priceOutput: NaN }), { cacheHit: 0.2, input: 2, output: 3 })
+
+  assert.equal(yuanOf(1000000, 2), 2)
+  assert.equal(roundMoney(2.3456789), 2.345679)
+  assert.deepEqual(moneyOf({ hit: 1000000, input: 1000000, output: 1000000 }, prices), {
+    cacheHit: 0.2,
+    input: 2,
+    output: 3,
+    total: 5.2,
+  })
+  // 加权输入均价：命中占比越高越便宜。
+  assert.equal(blendedInputPrice(prices, 0), 2)
+  assert.equal(blendedInputPrice(prices, 1), 0.2)
+  assert.equal(blendedInputPrice(prices, 0.5), 1.1)
 })
 
 test('normalizeConfig 忽略未知键并回调 warn', () => {

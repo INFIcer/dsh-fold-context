@@ -203,6 +203,67 @@ test('成本提示只拿「归折叠管的部分」跟实测比，并点明两�
   assert.ok(noteFor(null).includes('要等本轮有一次模型调用'))
 })
 
+test('账单按三档单价结算成人民币', () => {
+  const { module } = loadClient()
+  assert.equal(typeof module.__test.formatMoney, 'function')
+  // 金额极小也给得出数，且不出现科学计数法。
+  assert.equal(module.__test.formatMoney(0), '¥0')
+  assert.equal(module.__test.formatMoney(0.0002), '¥0.0002')
+  assert.equal(module.__test.formatMoney(-1.5), '−¥1.50')
+
+  const section = module.__test.CostSection({
+    cost: {
+      prices: { cacheHit: 0.2, input: 2, output: 3 },
+      latest: { promptTokens: 850 },
+      drift: null,
+      totals: {
+        turns: 1,
+        steps: 2,
+        foldedTokens: 1100,
+        unfoldedTokens: 3400,
+        foldedHitTokens: 1000,
+        foldedInputTokens: 100,
+        unfoldedHitTokens: 3000,
+        unfoldedInputTokens: 400,
+        outputTokens: 50,
+        netSavedTokens: 2300,
+        savedRate: 0.68,
+        foldedMoney: 0.0004,
+        unfoldedMoney: 0.0045,
+        netSavedMoney: 0.0041,
+        actualTurns: 1,
+        actualSteps: 2,
+        actualHitTokens: 800,
+        actualInputTokens: 50,
+        actualOutputTokens: 20,
+        actualPromptTokens: 850,
+        actualMoney: 0.0003,
+        latestMoney: 0.0002,
+      },
+      turns: [{
+        turn: 1,
+        steps: 2,
+        foldedTokens: 1100,
+        unfoldedTokens: 3400,
+        netSavedTokens: 2300,
+        netSavedMoney: 0.0041,
+        actualPromptTokens: 850,
+      }],
+    },
+  })
+  const text = JSON.stringify(section)
+  assert.ok(text.includes('账单（按单价结算）'), text.slice(0, 300))
+  assert.ok(text.includes('缓存命中输入'))
+  assert.ok(text.includes('输入（未命中）'))
+  assert.ok(text.includes('单价（¥ / M）'))
+  assert.ok(text.includes('净省金额'))
+  assert.ok(text.includes('实测账单'))
+  // 命中 1000 token × ¥0.2/M = ¥0.0002
+  assert.ok(text.includes('¥0.0002'), text.slice(0, 500))
+  // 单价这一列是数值本身，不是金额格式
+  assert.ok(text.includes('"¥0.2"'))
+})
+
 test('参数表单只挂在插件页，折叠 tab 不再有设置入口', () => {
   const source = readFileSync(clientFile, 'utf8')
   assert.ok(source.includes("['ledger', '账本']"))
