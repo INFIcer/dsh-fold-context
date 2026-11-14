@@ -2,7 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -61,8 +61,9 @@ test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-checkpoint')), true)
   // 官方压缩的检查点也是一次摘要：再折一次模型就看不见「哪段被压过」了。
   assert.equal(isKeeper(userNode(1, 'hi', 'compact-checkpoint')), true)
-  // 调度提醒和运行时注入都是上下文，不是用户此刻说的话：折掉后仍能召回，下一轮还会重新注入。
-  assert.equal(isKeeper(userNode(1, 'hi', 'schedule')), false)
+  // 调度器投递的是用户指令：折掉等于吞掉用户要求，所以和用户原话一样保留。
+  assert.equal(isKeeper(userNode(1, 'hi', 'schedule')), true)
+  // 运行时注入是上下文，下一轮会重新注入最新的一份。
   assert.equal(isKeeper(userNode(1, 'hi', 'runtime-context')), false)
 })
 
@@ -103,10 +104,19 @@ test('每轮开头的运行时注入自己开一个片段，不再永久留在�
   assert.deepEqual(segments[0].map((n) => n.seq), [1, 2, 3])
 })
 
-test('调度提醒也当上下文折叠', () => {
+test('调度指令是 keeper，不进入折叠片段', () => {
   const nodes = [userNode(1, '重启完成', 'schedule'), assistantNode(2, { text: 'a' })]
   const segments = planSegments(nodes)
-  assert.deepEqual(segments[0].map((n) => n.seq), [1, 2])
+  assert.deepEqual(segments[0].map((n) => n.seq), [2])
+})
+
+test('system/message 在片段之间断开，不会被替换区间扫掉', () => {
+  const systemNode = { type: 'system/message', seq: 2, data: { message: { role: 'system', content: [{ type: 'text', text: '新版提示词' }] } } }
+  const nodes = [assistantNode(1, { text: 'x'.repeat(300) }), systemNode, assistantNode(3, { text: 'y'.repeat(300) })]
+  const segments = planSegments(nodes)
+  assert.equal(segments.length, 2)
+  assert.deepEqual(segments[0].map((n) => n.seq), [1])
+  assert.deepEqual(segments[1].map((n) => n.seq), [3])
 })
 
 test('runtime-context 注入跟着片段一起折叠，fold-pin 则切断片段', () => {
@@ -391,7 +401,7 @@ test('noteBudget 按比例计算，并受 80 与 maxNoteChars 两头夹住', () 
   assert.equal(noteBudget(5000, normalizeConfig({ noteRatio: 0.5, maxNoteChars: 2000 })), 2000)
 })
 
-test('ConfigStore 落盘后能被下一次 load 读到，文件覆盖 profile 配置', () => {
+test('ConfigStore 只把显式改过的键写进文件层，profile 的其它值不被冻结', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
   const store = new ConfigStore({ homeDir, log: silent })
   store.load({ minFoldChars: 900 })
@@ -401,12 +411,21 @@ test('ConfigStore 落盘后能被下一次 load 读到，文件覆盖 profile �
   assert.equal(saved.noteRatio, 0.2)
   const raw = JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8'))
   assert.equal(raw.noteRatio, 0.2)
-  assert.equal(raw.minFoldChars, 900)
+  // 早先把合并后的 current 整份写盘，profile 的 900 会被冻结进文件，之后改 profile 永远不生效。
+  assert.equal(raw.minFoldChars, undefined, 'profile 的值不写进文件')
 
   const again = new ConfigStore({ homeDir, log: silent })
   const loaded = again.load({ minFoldChars: 300 })
-  assert.equal(loaded.minFoldChars, 900, '文件里的值优先')
+  assert.equal(loaded.minFoldChars, 300, 'profile 改了，文件没覆盖这个键，就跟着 profile 走')
   assert.equal(loaded.noteRatio, 0.2)
+
+  // reset 必须是「显式写入默认值」：只清文件层的话，重启后 profile 又把它盖回去。
+  again.reset()
+  assert.equal(again.get().minFoldChars, 1200)
+  const resetRaw = JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8'))
+  assert.equal(resetRaw.minFoldChars, 1200)
+  const third = new ConfigStore({ homeDir, log: silent })
+  assert.equal(third.load({ minFoldChars: 300 }).minFoldChars, 1200, '默认值压过 profile')
 })
 
 test('validateConfigPatch 只收白名单键，且逐项拒绝非法值', () => {
@@ -568,8 +587,8 @@ test('fold_config 支持 get/set/reset，并拒绝非法键', async () => {
   const reset = await tool.execute({ action: 'reset' }, {})
   assert.equal(reset.ok, true)
   assert.equal(configStore.get().noteRatio, 0.1)
-  // 落盘只写与默认值不同的项，所以恢复默认后文件里不再有 noteRatio。
-  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).noteRatio, undefined)
+  // reset 把默认值显式写进文件层，所以 noteRatio 是 0.1 而不是「键消失」。
+  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).noteRatio, 0.1)
 })
 
 test('statsOf 记下改过与读过的文件', () => {
@@ -724,3 +743,93 @@ test('fold_recall 用 query 检索，且不增加召回次数', async () => {
   assert.ok(empty.text.includes('query'), empty.text)
 })
 
+test('recallItems 保留完整工具调用参数（不再截到 300 字）', () => {
+  const args = 'x'.repeat(5000)
+  const items = recallItems(
+    [assistantNode(1, { calls: [{ id: 'c1', name: 'run_code', args: { code: args } }] })],
+    Number.MAX_SAFE_INTEGER,
+  )
+  assert.equal(items.length, 1)
+  assert.ok(items[0].text.includes(args), '参数原文必须完整')
+})
+
+test('失败的工具调用不会把文件报成「改过」', () => {
+  const call = assistantNode(1, { calls: [{ id: 'c1', name: 'edit', args: { file_path: 'E:/repo/lib/x.js' } }] })
+  const failure = toolNode(2, 'c1', '权限不足')
+  failure.data.message.isError = true
+  const stats = statsOf([call, failure])
+  assert.deepEqual(stats.files.changed, [])
+  assert.deepEqual(stats.files.read, ['E:/repo/lib/x.js'])
+})
+
+test('POSIX 绝对路径也能进文件清单，URL 不会被当成路径', () => {
+  const call = { name: 'run_code', arguments: JSON.stringify({ code: 'cat /home/me/project/lib/a.js && echo http://x/y/z' }) }
+  const files = filesOfToolCall(call)
+  assert.ok(files.read.some((path) => path.endsWith('/home/me/project/lib/a.js')))
+  assert.ok(files.read.every((path) => !path.includes('http')))
+})
+
+test('载荷写失败时不写检查点，避免留下召回不到的死引用', () => {
+  const session = new FakeSession('sess-store-fail')
+  const nodes = [
+    userNode(1, '做点事', 'user'),
+    assistantNode(2, { reasoning: '想'.repeat(800) }),
+  ]
+  session.seed(nodes)
+  const store = { append: () => false, findFold: () => undefined, pins: () => [] }
+  const result = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({}), store, log: silent })
+  assert.equal(result.folded, 0)
+  assert.equal(session.events.length, 0, '没有载荷就不该出现检查点')
+})
+
+test('同一轮超过 26 段时段号后缀继续 aa、ab', () => {
+  const session = new FakeSession('sess-suffix')
+  const nodes = []
+  for (let i = 0; i < 28; i += 1) {
+    nodes.push(userNode(i * 2 + 1, '继续', 'user'))
+    nodes.push(assistantNode(i * 2 + 2, { reasoning: 'r'.repeat(1300) }))
+  }
+  session.seed(nodes)
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+  const result = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({ maxFoldsPerTurn: 32 }), store, log: silent })
+  assert.equal(result.ids.length, 28)
+  assert.equal(result.ids[0], 'f1a')
+  assert.equal(result.ids[25], 'f1z')
+  assert.equal(result.ids[26], 'f1aa')
+  assert.equal(result.ids[27], 'f1ab')
+})
+
+test('FoldStore 超过上限时清理最旧的折叠、保留 pin，并记住被清理的编号', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const store = new FoldStore({ homeDir, sessionId: 'cap', maxChars: 4000 })
+  const big = (id, turn) => ({ kind: 'fold', id, turn, chars: 3000, items: [{ seq: turn, text: 'x'.repeat(3000) }] })
+  store.append(big('f1', 1))
+  store.append(big('f2', 2))
+  assert.equal(store.findFold('f2') !== undefined, true, '最新一条必须保留')
+  assert.equal(store.findFold('f1'), undefined)
+  assert.equal(store.isPruned('f1'), true)
+  store.append({ kind: 'pin', id: 'P', text: '别丢' })
+  assert.equal(store.pins().length, 1)
+})
+
+test('上次写到一半的末行不会把新记录接坏', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const store = new FoldStore({ homeDir, sessionId: 'half' })
+  store.append({ kind: 'pin', id: 'A', text: '1' })
+  appendFileSync(store.filePath, '{"kind":"pin"')
+  const again = new FoldStore({ homeDir, sessionId: 'half' })
+  again.append({ kind: 'pin', id: 'B', text: '2' })
+  const records = again.readAll()
+  assert.equal(records.length, 2)
+  assert.equal(records[1].id, 'B')
+})
+
+test('ConfigStore 写盘失败时抛错，不假装成功', () => {
+  const base = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const blocker = join(base, 'blocker')
+  writeFileSync(blocker, 'x')
+  const store = new ConfigStore({ homeDir: blocker, log: silent })
+  store.load({})
+  assert.throws(() => store.save({ noteRatio: 0.2 }), /写配置文件失败/)
+})

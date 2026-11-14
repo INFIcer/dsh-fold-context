@@ -436,3 +436,42 @@ test('config 路由 POST reset 用默认值覆盖', async () => {
   assert.equal(body.config.recallDirectChars, 8000)
 })
 
+test('/fold-* 只允许本机同源：非回环 Host、跨站 Origin、非 JSON POST 都 403', async () => {
+  const routes = []
+  const ctx = { webServer: { register(route) { routes.push(route); return () => {} } } }
+  registerStatsRoute({
+    ctx,
+    log: quietLog,
+    makeStore: () => makeStore([]),
+    getConfig: () => ({}),
+    updateConfig: (patch) => patch,
+  })
+  const stats = routes.find((route) => route.path === statsPath)
+  assert.ok(stats)
+
+  const badHost = fakeRes()
+  stats.handler({ url: statsPath + '?session=s1', method: 'GET', headers: { host: 'attacker.example' } }, badHost)
+  assert.equal(badHost.state.status, 403, 'DNS rebinding 的 Host 不是回环地址')
+
+  const badOrigin = fakeRes()
+  stats.handler({ url: statsPath + '?session=s1', method: 'GET', headers: { host: '127.0.0.1:3633', origin: 'http://evil.example' } }, badOrigin)
+  assert.equal(badOrigin.state.status, 403, '跨站 Origin 不能读历史')
+
+  const sameOrigin = fakeRes()
+  stats.handler({ url: statsPath + '?session=s1', method: 'GET', headers: { host: '127.0.0.1:3633', origin: 'http://127.0.0.1:3633' } }, sameOrigin)
+  assert.equal(sameOrigin.state.status, 200)
+
+  const config = routes.find((route) => route.path === configPath)
+  const plain = fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldChars: 900 } }))
+  plain.headers = { host: '127.0.0.1:3633', origin: 'http://127.0.0.1:3633', 'content-type': 'text/plain' }
+  const denied = fakeRes()
+  await config.handler(plain, denied)
+  assert.equal(denied.state.status, 403, '简单请求（text/plain）带不了 JSON，CSRF 进不来')
+
+  const json = fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldChars: 900 } }))
+  json.headers = { host: '127.0.0.1:3633', origin: 'http://127.0.0.1:3633', 'content-type': 'application/json' }
+  const allowed = fakeRes()
+  await config.handler(json, allowed)
+  assert.equal(allowed.state.status, 200)
+})
+

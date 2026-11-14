@@ -152,6 +152,25 @@ test('重要消息 = 首次未命中 + 之后每步按命中价常驻', () => {
   assert.equal(row.pinMoney, roundMoney((tokens * 1 + tokens * 0.5 * 0.02) / 1e6))
 })
 
+test('buildStats 标记被压缩卷走的 pin，并从当前常驻里扣掉', () => {
+  const records = [
+    fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40)),
+    { kind: 'pin', id: 'P1', turn: 1, at: 2001, text: 'still here' },
+    { kind: 'pin', id: 'P2', turn: 1, at: 2002, text: 'swallowed' },
+  ]
+  const stats = buildStats({ records, config: {}, presentPins: new Set(['P1']) })
+  assert.equal(stats.totals.pins, 2)
+  assert.equal(stats.totals.pinsPresent, 1)
+  assert.equal(stats.totals.pinsLost, 1)
+  const lost = stats.pins.find((row) => row.id === 'P2')
+  assert.equal(lost.present, false)
+  const kept = stats.pins.find((row) => row.id === 'P1')
+  assert.equal(kept.present, true)
+  // 常驻只算还看得见的 pin：否则账本会继续给模型看不到的内容计费。
+  assert.equal(stats.current.pinChars, kept.chars)
+  assert.equal(stats.current.pinTokens, kept.tokens)
+})
+
 test('没有 provider 回报时按平均步数补，并标记估算', () => {
   const records = [
     fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40)),

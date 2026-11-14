@@ -136,3 +136,16 @@ test('describeFold 保留整段返回的旧格式', () => {
   assert.match(text, /--- #11 ---/)
   assert.match(text, /\[回复\] 开始搬/)
 })
+
+test('renderFoldParts 对单个超大段也截断到上限内', () => {
+  const huge = { kind: 'fold', id: 'f9', turn: 1, items: [{ seq: 1, text: '[工具结果] ' + 'x'.repeat(100000) }] }
+  const parts = foldParts(huge)
+  const text = renderFoldParts(huge, parts, { total: 1, maxChars: 1000 })
+  // 早先第一段无论多大都整段放入：100,000 字的段会原样塞回来。
+  assert.ok(text.length <= 1000, '单段不能突破上限，实际 ' + text.length)
+  assert.match(text, /本段已截断/)
+})
+
+test('normalizePartSelectors 接受数字段号', () => {
+  assert.deepEqual(normalizePartSelectors([1, '3-5']), ['1', '3-5'])
+})

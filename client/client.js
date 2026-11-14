@@ -244,7 +244,8 @@ window.__ModuleLoader__.load({
           label: '重要消息成本',
           value: (pin > 0 ? '−' : '') + formatTokens(pin) + ' token',
           color: pin > 0 ? '#fbbf24' : 'inherit',
-          hint: totals.pins + ' 条固化，' + formatChars(totals.pinChars || 0),
+          hint: totals.pins + ' 条固化，' + formatChars(totals.pinChars || 0) +
+            (totals.pinsLost > 0 ? '；' + totals.pinsLost + ' 条已被压缩卷走（不再计入常驻）' : ''),
         },
         {
           label: '净收益',
@@ -1369,7 +1370,7 @@ window.__ModuleLoader__.load({
         if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
           if (!window.confirm('恢复全部默认配置？已保存的自定义值会被覆盖。')) return
         }
-        submit({ reset: true }, '已恢复默认配置。')
+        submit({ reset: true }, '已写入默认配置（覆盖 profile 里的同名值）。')
       }
 
       if (payload.status === 'loading' && !payload.data) {

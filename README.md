@@ -7,11 +7,11 @@
 ## 行为
 
 1. 轮结束（`agent/turn-stopping`）时，把本轮从第一条非保留消息到最后一个节点的区间整体替换成一条 `user/message` 检查点消息。
-2. 不折：只有真正的用户原话、`fold_pin` 重要消息、上一次的检查点本身；单轮内容少于 `minFoldChars` 也不折。运行时上下文注入（`<system-reminder>`）、调度提醒都算上下文，跟思考与工具输出一起折掉——折掉的内容下一轮会重新注入最新的一份，要旧的就 `fold_recall`。
+2. 不折：真正的用户原话、调度器投递的用户指令、`fold_pin` 重要消息、上一次的检查点本身；单轮内容少于 `minFoldChars` 也不折。运行时上下文注入（`<system-reminder>`）算上下文，跟思考与工具输出一起折掉——折掉的内容下一轮会重新注入最新的一份，要旧的就 `fold_recall`。
 3. 检查点正文写清折叠了几步、几次工具调用、工具名、回复的开头与结尾，并给出 `fold_recall("f7")` 这类编号；另有一行「· 文件：改过 …；读过 …」记下这一轮碰过哪些文件——改过的要重读，只读过的不必整份重读。
-4. 召回是分级的：`fold_recall("f7")` 在原文不超过 `recallDirectChars` 字时直接给全文；更长的先返回分段目录（段号、类型、字数、开头），模型再用 `fold_recall("f7", parts: ["1", "4-6"])` 或 `parts: ["think"]` / `["tools"]` 多选取回。内容召回会累计次数，超过 `recallReminderAfter` 时要求模型用 `fold_pin` 固化结论；只查目录不算。载荷在折叠时就保存整段原文（含最终回复），召回限流只发生在返回时。
+4. 召回是分级的：`fold_recall("f7")` 在原文不超过 `recallDirectChars` 字时直接给全文；更长的先返回分段目录（段号、类型、字数、开头），模型再用 `fold_recall("f7", parts: ["1", "4-6"])` 或 `parts: ["think"]` / `["tools"]` 多选取回。内容召回会累计次数，超过 `recallReminderAfter` 时要求模型用 `fold_pin` 固化结论；只查目录不算。载荷在折叠时就保存整段原文（含最终回复与完整的工具调用参数），召回限流只发生在返回时；载荷按会话受 `maxStoreChars` 约束，超了先清理最旧的折叠。
 5. 只记得关键词时用检索：`fold_recall({query: "lib/web.js"})` 扫全部折叠原文，只回折叠编号、段号与命中片段，不返回原文，也不计召回次数；拿到编号后再 `fold_recall({id: "f5", parts: ["2","4"]})` 取原文。`id` 与 `query` 同时给时，只在这条折叠里筛段。
-6. `fold_pin` 追加一条 `【重要·永不折叠】` 消息：本插件的按轮折叠不会折它；长会话里压缩层仍可能随时间把它并进摘要，插件不补发。默认不设条数与长度上限：值不值得记交给模型判断，`maxPins` 与 `pinBudgetChars` 只有在显式设成正数时才作为软上限提示，不会拒绝发布。
+6. `fold_pin` 追加一条 `【重要·永不折叠】` 消息：本插件的按轮折叠不会折它；长会话里压缩层仍可能随时间把它并进摘要，插件不补发。账本会核对模型此刻可见的历史，把被卷走的 pin 标成「已压缩」并不再计入常驻占用（拿不到活会话时保持旧口径）。默认不设条数与长度上限：值不值得记交给模型判断，`maxPins` 与 `pinBudgetChars` 只有在显式设成正数时才作为软上限提示，不会拒绝发布。
 7. 系统提示词追加一段 `fold-compression`，说明机制与三个工具（`fold_recall`、`fold_pin`、`fold_config`）的用法。
 8. 模型可以用 `fold_config` 在会话中查看、修改或重置配置，不用重启。
 
@@ -28,7 +28,9 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 
 ## 配置
 
-配置按「默认值 < profile 里的 `config` < `$DSH_HOME/fold-config.json`」合并，文件里的值最后生效。加载时越界值自动钳制、未知键忽略并写一条 warn，所以写错配置不会让插件起不来。插件写文件时只保存与默认值不同的项：配置文件是覆盖层而不是快照，升级默认值（单价、上限、提示词）能穿透到已经保存过的会话。
+配置按「默认值 < profile 里的 `config` < `$DSH_HOME/fold-config.json`」合并，文件里的值最后生效。加载时越界值自动钳制、未知键忽略并写一条 warn，所以写错配置不会让插件起不来。
+
+`fold-config.json` 是覆盖层而不是快照：单独 `set` 一个键时，只把这个键写进文件，profile 里的其它值不会被冻结（以后改 profile 仍然生效）。`reset` 会把**全部字段显式写成默认值**，所以它会盖过 profile；想回到 profile 的配置，删掉这个文件或把它改成 `{}` 再重启。升级默认值时，文件里没碰过的字段会跟着新默认值走。
 
 | 字段 | 默认 | 范围 | 作用 |
 | --- | --- | --- | --- |
@@ -50,6 +52,7 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 | `promptOrder` | `300` | -1000~10000 | 系统提示段的排序值，越小越靠前 |
 | `foldToolOutputs` | `true` | 布尔 | `false` 时工具输出既不进摘要、也不进召回载荷，也不计入 `minFoldChars` 的体量 |
 | `maxFoldsPerTurn` | `8` | 1~32 | 一轮最多折成几段，超出的片段保留原文 |
+| `maxStoreChars` | `8000000` | 0~100000000 | 每个会话的 `fold-store` 载荷上限（字符），`0` 表示不限制；超了从最旧的折叠开始清理 |
 | `cacheHitRate` | `0.97` | 0~1 | 前缀缓存的真实命中率（DeepSeek 实测约 97%）。只在没有 provider 回报时兜底；有回报时成本模型改用实测值 |
 | `priceCacheHitInput` | `0.02` | 0~1000 | 缓存命中输入单价，元 / 百万 token（DeepSeek 空闲时段官方价，高峰是两倍） |
 | `priceInput` | `1` | 0~1000 | 输入（未命中缓存）单价，元 / 百万 token（同上） |
@@ -61,14 +64,14 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 
 - `fold_config({ action: "get" })`：返回当前生效配置、配置文件路径与每项取值范围。
 - `fold_config({ action: "set", patch: { noteRatio: 0.2 } })`：只接受上表白名单键，逐项校验；通过后写文件并立即生效。非法键或越界值整批拒绝，不会出现「改了一半」。
-- `fold_config({ action: "reset" })`：恢复全部默认值并写文件。
+- `fold_config({ action: "reset" })`：把全部字段显式写成默认值并落盘，覆盖 profile 里的同名配置。
 
 手工改 `fold-config.json` 也可以，但要重启 DSH 才生效；想让改动立刻起作用，用 `fold_config`。
 
 ## 数据落在哪
 
 - 会话日志：检查点与重要消息都是普通 `user/message`，`source.kind` 分别是 `fold-checkpoint`、`fold-pin`。恢复/分叉照原样重放，不依赖插件在线。
-- `$DSH_HOME/fold-store/<会话>.jsonl`：折叠原文、召回次数、重要消息快照。召回靠它，删掉就只能看到检查点的摘要行。
+- `$DSH_HOME/fold-store/<会话>.jsonl`：折叠原文、召回次数、重要消息快照。召回靠它，删掉就只能看到检查点的摘要行。文件在首次访问时解析一次，之后走内存索引；超过 `maxStoreChars` 时按会话从最旧的折叠开始清理，被清理的编号在召回时会明确说「已清理」，并保留一条 `prune` 记录。
 - `$DSH_HOME/dsh-fold-context.log`：运行日志。
 
 ## 可视化调试
@@ -153,7 +156,7 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 
 页头右侧的「逐轮报告」按钮新窗口打开 `GET /fold-report?session=<会话 id>`：服务端按当前历史现算同一份逐轮 HTML，不落盘、不用先调工具。会话已不在进程里时返回 404 并说明原因。
 
-`/fold-stats` 只读 `fold-store` 的记录，不需要会话活着；`/fold-report`、`/fold-view` 与 `/fold-composition` 都要读 `session.deriveMessages()`，会话不在进程里就返回 404。这五个路由缺 `session` 参数返回 400，找不到会话返回 404；`/fold-config` 另接受 `POST`（`{patch}` 或 `{reset:true}`），其余路由只接受 `GET`/`HEAD`。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响；宿主没有插件页（缺 `ui-plugin-manager`）时参数表单也无处渲染，`fold_config` 工具照旧可用。
+`/fold-stats` 只读 `fold-store` 的记录，不需要会话活着；`/fold-report`、`/fold-view` 与 `/fold-composition` 都要读 `session.deriveMessages()`，会话不在进程里就返回 404。这五个路由缺 `session` 参数返回 400，找不到会话返回 404；`/fold-config` 另接受 `POST`（`{patch}` 或 `{reset:true}`），其余路由只接受 `GET`/`HEAD`。所有 `/fold-*` 只接受本机同源请求：`Host` 必须是回环地址（防 DNS rebinding），`Origin` 存在时必须与 `Host` 一致（防跨站读取历史），`POST` 必须是 `application/json`（跨站简单请求带不了这个类型，从而挡掉 CSRF）。不满足返回 403。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响；宿主没有插件页（缺 `ui-plugin-manager`）时参数表单也无处渲染，`fold_config` 工具照旧可用。
 
 ## 和 billion-context 共用
 
@@ -172,7 +175,7 @@ billion-context（本地代理式压缩）与本插件在不同层工作：前�
 - 每次替换都会让请求前缀变化，接在后面的压缩代理（如 billion-context）下一次请求会全量重发一次；这是折叠的固有成本。
 - 只折叠插件在线期间观察到的轮次：插件装上之前的历史保持原样。
 - 关键词检索只搜 `fold-store` 里的折叠原文：重要消息与用户原话本来就在上下文里，不参与检索；分叉会话同样搜不到父会话的载荷。检索只定位，不判断内容是否已过时——文件改过没有，看摘要里的「· 文件：改过 …」。
-- 官方压缩把 `fold_pin` 卷进摘要后，插件不再跟踪它：账本仍按它在上下文里计常驻开销，模型也取不回那条 pin。没装请求期代理又开回了默认压缩时，这个偏差才会出现。
+- 官方压缩把 `fold_pin` 卷进摘要后，插件不补发、模型也取不回那条 pin；账本只能把还活着的会话里「已经看不见的 pin」标成「已压缩」并从常驻占用里扣掉，会话不在进程里时仍按旧口径估算。没装请求期代理又开回了默认压缩时，这个偏差才会出现。
 
 ## 评测
 
