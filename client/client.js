@@ -252,6 +252,58 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 每轮请求开销：把每一轮「折叠后」与「不折叠」各重放一遍算出来的 token 账。
+    // 估算不等于账单，但两者的差能说明折叠到底省在哪：省下的量随轮数累积，
+    // 检查点本身每轮只付一次未命中的钱。
+    function CostSection(props) {
+      var cost = props.cost || {}
+      var totals = cost.totals || {}
+      var latest = cost.latest || null
+      var rows = Array.isArray(cost.turns) ? cost.turns : []
+      var saved = totals.netSavedTokens || 0
+      var kpis = h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' } },
+        h(Kpi, { label: '折叠开销', value: formatTokens(totals.foldedTokens), color: '#34d399', hint: '按当前历史重放 ' + (totals.turns || 0) + ' 轮 / ' + (totals.steps || 0) + ' 步请求' }),
+        h(Kpi, { label: '不折叠开销', value: formatTokens(totals.unfoldedTokens), color: '#f87171', hint: '原文一直留在上下文里' }),
+        h(Kpi, { label: '净节省', value: (saved >= 0 ? '+' : '') + formatTokens(saved), color: saved >= 0 ? '#34d399' : '#f87171', hint: '省 ' + percent(totals.savedRate || 0) + '；缓存命中按 ' + Math.round((cost.hitRatio || 0) * 100) + '% 计价' }),
+        h(Kpi, { label: '实际输入', value: latest ? formatTokens(latest.promptTokens) : '—', color: '#60a5fa', hint: latest ? '最近一次请求；有回报的 ' + (totals.actualTurns || 0) + ' 轮累计 ' + formatTokens(totals.actualPromptTokens || 0) : '本进程还没有拿到 provider 回报' })
+      )
+      var gap = totals.coveredFoldedTokens > 0 ? totals.actualPromptTokens < totals.coveredFoldedTokens * 0.7 : false
+      var note = gap
+        ? '实际输入比估算低很多：说明还有请求期压缩在改写信史（例如 billion-context），估算量的是会话历史，不是真正上行的内容。'
+        : latest
+          ? '实际输入是 provider 回报的计费输入（含缓存命中），按轮累加；估算与它同向，但不会完全相等。'
+          : '实际输入要等本轮有一次模型调用后才会出现。'
+      var body = rows.length === 0
+        ? h('div', { style: C.notice }, '还没有可估算的轮次。')
+        : h('div', { style: { maxHeight: '280px', overflowY: 'auto' } },
+            h('table', { style: C.table },
+              h('thead', {}, h('tr', {}, ['轮', '步', '折叠后', '不折叠', '净节省', '实际输入'].map(function (title) {
+                return h('th', { key: title, style: C.th }, title)
+              }))),
+              h('tbody', {}, rows.map(function (row) {
+                var rowSaved = row.netSavedTokens || 0
+                return h('tr', { key: 'c' + row.turn + '-' + (row.steps || 1) },
+                  h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.turn === null ? '?' : row.turn)),
+                  h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.steps || 1)),
+                  h('td', { style: Object.assign({}, C.td, C.mono) }, formatTokens(row.foldedTokens)),
+                  h('td', { style: Object.assign({}, C.td, C.mono) }, formatTokens(row.unfoldedTokens)),
+                  h('td', { style: Object.assign({}, C.td, C.mono, { color: rowSaved >= 0 ? '#34d399' : '#f87171' }) }, (rowSaved >= 0 ? '+' : '') + formatTokens(rowSaved)),
+                  h('td', { style: Object.assign({}, C.td, C.mono, { opacity: row.actualPromptTokens ? 1 : 0.4 }) }, row.actualPromptTokens ? formatTokens(row.actualPromptTokens) : '—')
+                )
+              }))
+            )
+          )
+      return h('div', { style: C.section },
+        h('div', { style: C.sectionHead },
+          h('div', { style: C.sectionTitle }, '每轮请求开销（估算）'),
+          h('div', { style: C.sub }, '折叠后与不折叠各重放一遍；检查点按未命中计，命中从上一个切点算起')
+        ),
+        kpis,
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, note),
+        body
+      )
+    }
+
     // ---------- 账本 ----------
     function Ledger(props) {
       var sessionId = props.sessionId
@@ -298,7 +350,7 @@ window.__ModuleLoader__.load({
             .then(readJson)
             .then(function (body) {
               if (!live) return
-              setComposition({ data: body && body.composition ? body.composition : null, error: '' })
+              setComposition({ data: body || null, error: '' })
             })
             .catch(function (error) {
               if (!live || (error && error.name === 'AbortError')) return
@@ -341,12 +393,16 @@ window.__ModuleLoader__.load({
         h(Kpi, { label: '净收益', value: (totals.netTokens >= 0 ? '+' : '') + formatTokens(totals.netTokens), color: totals.netTokens >= 0 ? '#34d399' : '#f87171', hint: '当前历史里折叠摘要 + 重要消息约占 ' + formatTokens(data.current ? data.current.tokens : 0) + ' token' })
       )
 
-      var composition = compositionState[0].data
+      var compositionBody = compositionState[0].data
+      var composition = compositionBody && compositionBody.composition ? compositionBody.composition : null
+      var cost = compositionBody && compositionBody.cost ? compositionBody.cost : null
       var compositionPanel = composition
         ? h(CompositionPanel, { composition: composition })
         : compositionState[0].error
           ? h('div', { style: { fontSize: '11px', color: '#f87171' } }, '上下文构成读取失败：' + compositionState[0].error + '（' + Math.round(COMPOSITION_REFRESH_MS / 1000) + ' 秒后自动重试）')
           : null
+
+      var costSection = cost ? h(CostSection, { cost: cost }) : null
 
       var turns = Array.isArray(data.turns) ? data.turns : []
       var max = 1
@@ -380,7 +436,7 @@ window.__ModuleLoader__.load({
         '估算口径与宿主 token-meter 一致：每 ' + (data.estimate ? data.estimate.charsPerToken : 4) + ' 字符算 1 token，每个文本块再加 ' + (data.estimate ? data.estimate.blockOverhead : 4) + ' token 开销。'
       )
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, toolbar, errorLine, kpis, compositionPanel, chartSection, tableSection, footnote)
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, toolbar, errorLine, kpis, compositionPanel, costSection, chartSection, tableSection, footnote)
     }
 
     // ---------- 模型视角 ----------
@@ -977,6 +1033,15 @@ window.__ModuleLoader__.load({
         ' 条、重要消息 ' + (totals.pins || 0) + ' 条；相比不折叠省 ' + formatChars(totals.savedChars) +
         '（' + percent(totals.saveRate) + '）。'
       )
+      var actual = data.actual || null
+      var gap = actual ? tokens > actual.promptTokens * 1.3 : false
+      var actualNote = actual
+        ? h('div', { style: { fontSize: '11px', lineHeight: '17px', color: gap ? '#fbbf24' : 'inherit', opacity: gap ? 1 : 0.7 } },
+            'provider 回报：最近一次请求的计费输入 ' + formatTokens(actual.promptTokens) + ' token（新输入 ' + formatTokens(actual.inputTokens) + ' + 缓存命中 ' + formatTokens(actual.cacheReadTokens) + ' + 写缓存 ' + formatTokens(actual.cacheWriteTokens) + '）。' +
+            (gap
+              ? '它明显少于上面的估算：还有请求期压缩在改写信史（例如 billion-context），上面的数字量的是会话历史，不是真正上行的内容。'
+              : '这里的估算与账单同向。'))
+        : h('div', { style: { fontSize: '11px', lineHeight: '17px', opacity: 0.5 } }, 'provider 回报要等本轮发生一次模型调用后才有。')
       var warns = (data.warns || []).map(function (text, index) {
         return h('div', { key: 'w' + index, style: { fontSize: '11px', opacity: 0.65, lineHeight: '17px' } }, '· ' + text)
       })
@@ -990,6 +1055,7 @@ window.__ModuleLoader__.load({
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
         toolbar,
         notice,
+        actualNote,
         warns.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, warns) : null,
         groups.map(function (group, index) {
           return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0], current: index === lastSystemIndex })

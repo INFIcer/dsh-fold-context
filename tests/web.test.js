@@ -303,6 +303,12 @@ test('composition 路由只回构成数据，格式与 view 的 composition 一�
   assert.ok(Array.isArray(body.composition.categories) && body.composition.categories.length > 0)
   assert.ok(Array.isArray(body.composition.points) && body.composition.points.length > 0)
   assert.ok(body.composition.totals.sum.folded > 0)
+  // 成本估算跟构成同一份分组算出来，只回汇总与逐轮数。
+  assert.equal(body.cost.ok, true)
+  assert.equal(body.cost.totals.turns, body.composition.points.filter((point) => point.kind === 'turn').length)
+  assert.equal(typeof body.cost.totals.foldedTokens, 'number')
+  assert.equal(typeof body.cost.totals.netSavedTokens, 'number')
+  assert.equal(body.cost.latest, null)
   // 账本只要图数据：整轮明细留在 /fold-view，别让 20 秒一轮的轮询背上大包。
   assert.equal('groups' in body, false)
 })
@@ -327,6 +333,7 @@ test('composition 路由缺参数 400、找不到会话 404、空历史给空构
   handler(fakeReq(compositionPath + '?session=s2'), empty)
   assert.equal(empty.state.status, 200)
   assert.deepEqual(JSON.parse(empty.state.body).composition.points, [])
+  assert.equal(JSON.parse(empty.state.body).cost.totals.turns, 0)
 })
 
 test('view 路由缺参数 400、找不到会话 404', () => {
@@ -337,6 +344,27 @@ test('view 路由缺参数 400、找不到会话 404', () => {
   const gone = fakeRes()
   handler(fakeReq(viewPath + '?session=gone'), gone)
   assert.equal(gone.state.status, 404)
+})
+
+test('view 路由带上 provider 最近一次回报，供「实际请求」对照', () => {
+  const messages = [
+    { id: 's1', role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system' } },
+    ...demoMessages,
+  ]
+  const handler = createViewHandler({
+    resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', messages) : undefined),
+    makeStore: () => makeStore([]),
+    getConfig: () => ({}),
+    getActualUsage: () => ({ input: 100, cacheRead: 900, cacheWrite: 0, output: 40, turn: 3, step: 2 }),
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq(viewPath + '?session=s1'), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.actual.promptTokens, 1000)
+  assert.equal(body.actual.outputTokens, 40)
+  assert.equal(body.actual.turn, 3)
 })
 
 test('config 路由 GET 返回字段表、当前值与文件路径', () => {

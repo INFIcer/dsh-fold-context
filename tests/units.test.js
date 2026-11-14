@@ -20,7 +20,8 @@ import {
 } from '../lib/config.js'
 import { promptSection, systemPromptText } from '../lib/prompt.js'
 import { recallReminder, registerTools } from '../lib/tools.js'
-import { FakeSession, assistantNode, makeCtx, toolNode, userNode } from './fakes.js'
+import { TurnTracker } from '../lib/turn-tracker.js'
+import { FakeSession, assistantNode, eventOf, makeCtx, toolNode, userNode } from './fakes.js'
 
 const silent = { info() {}, warn() {}, error() {} }
 
@@ -124,7 +125,15 @@ test('foldTurn 折叠够长的一轮，并留下可召回的载荷', () => {
   const store = new FoldStore({ homeDir, sessionId: session.id })
   const config = normalizeConfig({ minFoldChars: 1200 })
 
-  const result = foldTurn({ session, turn: 1, nodes, config, store, log: silent })
+  const result = foldTurn({
+    session,
+    turn: 1,
+    nodes,
+    usage: { inputTokens: 1200, cacheReadTokens: 8000, outputTokens: 300 },
+    config,
+    store,
+    log: silent,
+  })
   assert.equal(result.folded, 1)
   assert.deepEqual(result.ids, ['f1'])
 
@@ -138,6 +147,7 @@ test('foldTurn 折叠够长的一轮，并留下可召回的载荷', () => {
   const record = store.findFold('f1')
   assert.ok(record)
   assert.equal(record.chars, 1400)
+  assert.deepEqual(record.usage, { steps: 1, input: 1200, cacheRead: 8000, cacheWrite: 0, output: 300 })
   assert.ok(record.items.some((item) => item.text.includes('思')))
 })
 
@@ -154,6 +164,27 @@ test('foldTurn 对短回合与关闭开关都不动手', () => {
   const off = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({ enabled: false }), store, log: silent })
   assert.equal(off.folded, 0)
   assert.equal(session.events.length, 0)
+})
+
+test('TurnTracker 累加每步 provider 回报，snapshot 一并交出并清空', () => {
+  const tracker = new TurnTracker()
+  tracker.observe(eventOf('turn/start', { turn: 2 }, 1))
+  tracker.observe(eventOf('step/start', { turn: 2, step: 1 }, 2))
+  const assistant = assistantNode(3, { text: '我先看看' })
+  assistant.data.turn = 2
+  assistant.data.step = 1
+  assistant.data.usage = { inputTokens: 100, cacheReadTokens: 900, cacheWriteTokens: 0, outputTokens: 40 }
+  tracker.observe(assistant)
+  assert.equal(tracker.latest.prompt, 1000)
+  assert.equal(tracker.latest.turn, 2)
+  assert.equal(tracker.latest.step, 1)
+
+  tracker.observe(eventOf('step/end', { turn: 2, step: 1 }, 4))
+  const snapshot = tracker.snapshot()
+  assert.equal(snapshot.turn, 2)
+  assert.deepEqual(snapshot.usage, { steps: 1, input: 100, cacheRead: 900, cacheWrite: 0, output: 40 })
+  // 取走之后本轮用量清零，下一轮从头算。
+  assert.equal(tracker.snapshot().usage.steps, 0)
 })
 
 test('publishPin 受条数与预算约束，成功时写成 fold-pin 消息', () => {
