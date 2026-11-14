@@ -378,14 +378,35 @@ window.__ModuleLoader__.load({
     }
 
     // 折叠视角的重放量应该≈ provider 实测（同一份历史在每一步被重发），对不上就直接写差多少。
-    function estimateVsActualNote(totals) {
-      var actual = (totals && totals.actualPromptTokens) || 0
-      var folded = (totals && totals.foldedTokens) || 0
-      if (!actual || !folded) return ''
-      var diff = folded / actual - 1
-      var text = '折叠视角重放 ' + formatTokens(folded) + ' token，provider 实测 ' + formatTokens(actual) + ' token'
-      if (Math.abs(diff) <= 0.1) return text + '；两者一致（差 ' + percent(Math.abs(diff)) + '）。'
-      return text + '；估算' + (diff > 0 ? '偏高' : '偏低') + ' ' + percent(Math.abs(diff)) + '。'
+    // 只比「已经有回报」的轮次：正在跑的这轮还没被 provider 计费，把它算进来会显得估算偏高。
+    function estimateVsActualNote(cost) {
+      var rows = Array.isArray(cost.turns) ? cost.turns : []
+      var actual = 0
+      var coveredFolded = 0
+      var totalFolded = 0
+      var pendingFolded = 0
+      var pendingMoney = 0
+      for (var i = 0; i < rows.length; i += 1) {
+        var row = rows[i] || {}
+        totalFolded += row.foldedTokens || 0
+        if (!row.actualPromptTokens) {
+          pendingFolded += row.foldedTokens || 0
+          pendingMoney += row.foldedMoney || 0
+          continue
+        }
+        actual += row.actualPromptTokens
+        coveredFolded += row.foldedTokens || 0
+      }
+      if (!actual || !coveredFolded) return '实测账单要等本轮有一次模型调用并拿到 provider 回报后才会出现。'
+      var diff = coveredFolded / actual - 1
+      var text = '折叠视角重放 ' + formatTokens(coveredFolded) + ' token，provider 实测 ' + formatTokens(actual) + ' token'
+      text += Math.abs(diff) <= 0.1
+        ? '；两者一致（差 ' + percent(Math.abs(diff)) + '）'
+        : '；估算' + (diff > 0 ? '偏高' : '偏低') + ' ' + percent(Math.abs(diff))
+      if (pendingFolded > 0) {
+        text += '。另有在途轮次 ' + formatTokens(pendingFolded) + ' token（按单价约 ' + formatMoney(pendingMoney) + '）还没进实测账单，估算合计里含这部分'
+      }
+      return text + '。'
     }
 
     function CostSection(props) {
@@ -508,7 +529,7 @@ window.__ModuleLoader__.load({
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, costDriftNote(cost.drift)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, missNote(totals)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。'),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, estimateVsActualNote(totals)),
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, estimateVsActualNote(cost)),
         h('div', { style: Object.assign({}, C.sub, { margin: '10px 0 4px' }) }, '按类别拆分（估算）'),
         h('div', { style: { maxHeight: '260px', overflowY: 'auto' } },
           h('table', { style: C.table },

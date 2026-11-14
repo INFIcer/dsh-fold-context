@@ -368,6 +368,21 @@ test('校准：用实测总量反推系数，命中率也改用实测值', () =>
   assert.equal(cost.totals.actualTurns, 1)
 })
 
+test('折叠视角的未命中按实测收口：有回报的轮次与账单一致', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 3, chars: 1200, checkpointChars: 200, unfoldedChars: 60000, outputChars: 1184 }),
+  ]
+  const folds = [{ id: 'f1', turn: 1, usage: { steps: 3, input: 900, cacheRead: 2100, output: 300 } }]
+  const cost = buildCost({ groups, folds, config: {} })
+  // 折叠视角就是实测那次运行：总量校准到 3000，未命中校准到 900，命中 2100，输出 300。
+  assert.equal(cost.totals.foldedTokens, 3000)
+  assert.equal(cost.totals.foldedInputTokens, 900)
+  assert.equal(cost.totals.foldedHitTokens, 2100)
+  assert.equal(cost.totals.outputTokens, 300)
+  assert.equal(cost.totals.foldedMoney, cost.totals.actualMoney)
+})
+
 test('校准系数被钳制在安全区间', () => {
   const groups = [turn({ turn: 1, steps: 1, chars: 400000, checkpointChars: 0, unfoldedChars: 400000, outputChars: 400000 })]
   const folds = [{ id: 'f1', turn: 1, usage: { steps: 1, input: 10, cacheRead: 0, cacheWrite: 0, output: 1 } }]
