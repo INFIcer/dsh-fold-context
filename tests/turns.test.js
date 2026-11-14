@@ -59,11 +59,34 @@ test('blocksOfMessage 把思考、回复、工具调用拆开', () => {
 })
 
 test('blocksOfFoldItem 按行首前缀还原折叠载荷', () => {
-  const text = '[思考] 想一想\n[回复] 说一句\n[调用 read] {}\n[工具结果] 结果'
+  const text = '[思考] 想一想\n[回复] 说一句\n[调用 read] {}\n[调用 grep] {}'
   const blocks = blocksOfFoldItem(text)
-  assert.deepEqual(blocks.map((block) => block.kind), ['think', 'reply', 'call', 'result'])
+  assert.deepEqual(blocks.map((block) => block.kind), ['think', 'reply', 'call', 'call'])
   assert.equal(blocks[2].name, 'read')
   assert.equal(blocks[1].text, '说一句')
+})
+
+test('工具结果整段不拆：正文里出现 [回复]/[思考] 字样也不当标记', () => {
+  const text = '[工具结果] 文件内容：\n[回复] 这是源码里的字符串\n[思考] 这行也不是思考'
+  const blocks = blocksOfFoldItem(text)
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].kind, 'result')
+  assert.ok(blocks[0].text.indexOf('[回复] 这是源码里的字符串') >= 0)
+  assert.ok(blocks[0].text.indexOf('[思考] 这行也不是思考') >= 0)
+})
+
+test('助手段里回复正文引用 [思考] 时，不切出假的思考段', () => {
+  const text = '[回复] 我改的是这一行：\n[思考] 标记在提示词里\n就这样'
+  const blocks = blocksOfFoldItem(text)
+  assert.deepEqual(blocks.map((block) => block.kind), ['reply'])
+  assert.ok(blocks[0].text.indexOf('[思考] 标记在提示词里') >= 0)
+})
+
+test('注入消息里带标记也不拆，整段算一条上下文注入', () => {
+  const text = '[注入消息] <system-reminder>\n[回复] 不是回复'
+  const blocks = blocksOfFoldItem(text)
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].kind, 'inject')
 })
 
 test('entryKindOf 认得调度器投递的用户指令', () => {
