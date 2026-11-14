@@ -5,7 +5,7 @@
 // 这个文件直接被 /plugins/<包名>/client.js 加载。渲染只用 react.createElement，不依赖 JSX。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-fold-plugin',
+  id: 'dsh-fold-context',
   factory: function (require) {
     var module = { exports: {} }
     var exports = module.exports
@@ -1270,7 +1270,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ---------- 插件设置页（渲染在侧栏「插件」页的 dsh-fold-plugin 页面上） ----------
+    // ---------- 插件设置页（渲染在侧栏「插件」页的 dsh-fold-context 页面上） ----------
     function fieldRange(field) {
       if (!field) return ''
       var base = field.kind === 'boolean'
@@ -1437,7 +1437,7 @@ window.__ModuleLoader__.load({
       var tabs = [['ledger', '账本'], ['model', '模型视角']]
       var header = h('div', { style: C.row },
         h('div', { style: C.title }, '上下文折叠'),
-        h('div', { style: C.sub }, '按轮折叠 · 折叠算收益，召回与重要消息算成本 · 参数在侧栏「插件」页的 dsh-fold-plugin 页面里调'),
+        h('div', { style: C.sub }, '按轮折叠 · 折叠算收益，召回与重要消息算成本 · 参数在侧栏「插件」页的 dsh-fold-context 页面里调'),
         h('div', { style: { flex: 1 } }),
         h('a', {
           style: Object.assign({}, C.button, { textDecoration: 'none', display: 'inline-block' }),
@@ -1475,7 +1475,7 @@ window.__ModuleLoader__.load({
       ctx.slots.inject('plugins.bundle.config', function () {
         return ctx.slots.register({
           name: 'plugins.bundle.config',
-          key: 'dsh-fold-plugin',
+          key: 'dsh-fold-context',
         }, SettingsView)
       })
     }

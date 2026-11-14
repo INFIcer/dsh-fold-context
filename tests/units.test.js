@@ -634,11 +634,11 @@ function foldRecord(id, turn, items) {
 
 const SEARCH_RECORDS = [
   foldRecord('f2', 2, [
-    { seq: 10, text: '[思考] 先看看 lib/store.js 怎么写\n[调用 read] {"file_path":"E:/dsh-fold-plugin/lib/store.js"}' },
+    { seq: 10, text: '[思考] 先看看 lib/store.js 怎么写\n[调用 read] {"file_path":"E:/dsh-fold-context/lib/store.js"}' },
     { seq: 11, text: '[工具结果] 读到了，record 用 jsonl' },
   ]),
   foldRecord('f5', 5, [
-    { seq: 20, text: '[思考] 修 router\n[调用 edit] {"file_path":"E:/dsh-fold-plugin/lib/web.js"}' },
+    { seq: 20, text: '[思考] 修 router\n[调用 edit] {"file_path":"E:/dsh-fold-context/lib/web.js"}' },
     { seq: 21, text: '[工具结果] register({kind:"exact", path}) 已生效' },
   ]),
 ]

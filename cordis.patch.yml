@@ -1,5 +1,5 @@
 # 本层只负责把插件插进 profile；运行配置在 <DSH_HOME>/fold-config.json。
 # 配置优先级：默认值 < profile 里这一行的 config < fold-config.json。
 - insert:
-    - id: dsh-fold-plugin
-      name: 'dsh-fold-plugin'
+    - id: dsh-fold-context
+      name: 'dsh-fold-context'

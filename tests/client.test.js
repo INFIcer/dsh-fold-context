@@ -58,7 +58,7 @@ function fakeCtx() {
 
 test('客户端 bundle 声明 id 与 slots 依赖', () => {
   const { definition, module } = loadClient()
-  assert.equal(definition.id, 'dsh-fold-plugin')
+  assert.equal(definition.id, 'dsh-fold-context')
   assert.deepEqual(module.inject, ['slots'])
   assert.equal(typeof module.apply, 'function')
 })
@@ -78,7 +78,7 @@ test('apply 注册对话顶栏 View 与插件页配置位', () => {
   const config = registered[1].options
   assert.equal(config.name, 'plugins.bundle.config')
   // keyed slot 的键必须是组合包名，插件管理页拿它判断是否渲染配置区
-  assert.equal(config.key, 'dsh-fold-plugin')
+  assert.equal(config.key, 'dsh-fold-context')
   assert.equal(typeof registered[1].component, 'function')
 })
 

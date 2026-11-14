@@ -290,7 +290,7 @@ DSH 的客户端插件产物就是 `window.__ModuleLoader__.load({ id, factory }
 
 ## 设置页：字段表只有一个来源
 
-参数表单挂在原生「插件」页的组合包配置位（`plugins.bundle.config`，key 是组合包名 `dsh-fold-plugin`），不再占着对话顶栏：顶栏是「这个会话怎么样」，插件页才是「这个插件怎么配」。插件管理页用注册项的 `key` 判断该组合包有没有配置区，所以 key 必须与包名一致；没有 `ui-plugin-manager` 的部署里这块不渲染，`fold_config` 工具照旧可用。
+参数表单挂在原生「插件」页的组合包配置位（`plugins.bundle.config`，key 是组合包名 `dsh-fold-context`），不再占着对话顶栏：顶栏是「这个会话怎么样」，插件页才是「这个插件怎么配」。插件管理页用注册项的 `key` 判断该组合包有没有配置区，所以 key 必须与包名一致；没有 `ui-plugin-manager` 的部署里这块不渲染，`fold_config` 工具照旧可用。
 
 `configFields()` 同时喂三个出口：`fold_config` 工具的说明、`GET /fold-config` 的表单、`validateConfigPatch` 的校验。新增字段只改 `lib/config.js` 的 `FIELDS`，三处自动跟上，不会出现「工具能改、页面不认」的漂移。
 

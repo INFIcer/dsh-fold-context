@@ -253,8 +253,8 @@ test('折叠摘要带文件清单，关键词检索能把这一轮找回来', as
       reasoning: '先读一遍路由表'.repeat(200),
       text: '改好了'.repeat(60),
       calls: [
-        { id: 'c1', name: 'read', args: { file_path: 'E:/dsh-fold-plugin/lib/web.js' } },
-        { id: 'c2', name: 'edit', args: { file_path: 'E:/dsh-fold-plugin/lib/web.js' } },
+        { id: 'c1', name: 'read', args: { file_path: 'E:/dsh-fold-context/lib/web.js' } },
+        { id: 'c2', name: 'edit', args: { file_path: 'E:/dsh-fold-context/lib/web.js' } },
       ],
     }),
   )

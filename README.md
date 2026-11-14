@@ -1,4 +1,4 @@
-# dsh-fold-plugin
+# dsh-fold-context
 
 按轮折叠 DSH 会话历史：每轮结束时把本轮的思考、工具输出与长回复折成一条检查点消息，原文可凭编号召回，重要的结论由模型按需固化成常驻消息。
 
@@ -20,8 +20,8 @@
 profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bundles`：
 
 ```json
-"dependencies": { "dsh-fold-plugin": "link:E:/dsh-fold-plugin" },
-"dsh": { "profile": { "bundles": ["...", "dsh-fold-plugin"] } }
+"dependencies": { "dsh-fold-context": "link:E:/dsh-fold-context" },
+"dsh": { "profile": { "bundles": ["...", "dsh-fold-context"] } }
 ```
 
 重启 DSH 生效。包内 `cordis.patch.yml` 负责把插件插进插件表。
@@ -69,7 +69,7 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 
 - 会话日志：检查点与重要消息都是普通 `user/message`，`source.kind` 分别是 `fold-checkpoint`、`fold-pin`。恢复/分叉照原样重放，不依赖插件在线。
 - `$DSH_HOME/fold-store/<会话>.jsonl`：折叠原文、召回次数、重要消息快照。召回靠它，删掉就只能看到检查点的摘要行。
-- `$DSH_HOME/dsh-fold-plugin.log`：运行日志。
+- `$DSH_HOME/dsh-fold-context.log`：运行日志。
 
 ## 可视化调试
 
@@ -108,7 +108,7 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 - 系统提示词按出现时间就地成块，不进轮次编号；第 1 版展示全文，第 2 版起默认只展示与上一版的差异（`+`/`-` 行、`@@` 段头），另给「查看这一版全文」。
   - 所有卡片默认收起，点开才把正文挂进 DOM，一次展开大量原文也不会卡；这是界面折叠，和插件的上下文折叠无关。
 
-参数表单不在顶栏：它挂在原生「插件」页的 dsh-fold-plugin 组合包页面里（`plugins.bundle.config`，以组合包名为 key），和装了什么插件、开没开启放在一起。那里 `GET/POST /fold-config` 按同一张字段表渲染，保存即热生效，可一键恢复默认。顶栏只放当前会话的数据，改参数属于插件的一次性设置。
+参数表单不在顶栏：它挂在原生「插件」页的 dsh-fold-context 组合包页面里（`plugins.bundle.config`，以组合包名为 key），和装了什么插件、开没开启放在一起。那里 `GET/POST /fold-config` 按同一张字段表渲染，保存即热生效，可一键恢复默认。顶栏只放当前会话的数据，改参数属于插件的一次性设置。
 
 账本页显示（收益与成本都以 token 计，金额只作折算参考）：
 
