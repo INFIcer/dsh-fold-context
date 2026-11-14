@@ -1,0 +1,39 @@
+{
+  "name": "dsh-fold-plugin",
+  "version": "0.1.0",
+  "description": "按轮折叠上下文：每轮结束把长思考、工具输出与回复折成一条带编号的检查点，原文可召回，重要消息永不折叠。",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "lib/host.js",
+  "exports": {
+    ".": "./lib/host.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.2-rc.1 <0.3.0"
+  },
+  "scripts": {
+    "test": "node --test tests",
+    "check": "node --check lib/host.js && node --check lib/config.js && node --check lib/store.js && node --check lib/fold-text.js && node --check lib/plan.js && node --check lib/commit.js && node --check lib/tools.js && node --check lib/prompt.js && node --check lib/logger.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "context",
+    "fold",
+    "compaction"
+  ]
+}
