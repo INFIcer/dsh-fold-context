@@ -132,11 +132,14 @@ window.__ModuleLoader__.load({
       diffAdd: { background: 'rgba(52,211,153,.14)' },
       diffDel: { background: 'rgba(248,113,113,.14)' },
       diffFull: { marginTop: '8px' },
-      compBar: { display: 'flex', width: '100%', height: '8px', borderRadius: '3px', overflow: 'hidden', background: 'rgba(128,128,128,.14)' },
+      compBar: { position: 'relative', width: '100%', height: '8px', borderRadius: '3px', overflow: 'hidden', background: 'rgba(128,128,128,.10)' },
+      compFill: { display: 'flex', height: '100%', borderRadius: '3px', overflow: 'hidden' },
       compSeg: { height: '100%' },
+      compMark: { position: 'absolute', top: '0', bottom: '0', width: '1px', background: 'rgba(255,255,255,.7)' },
       compLine: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', marginTop: '6px' },
       compLineLabel: { width: '44px', flex: '0 0 44px', opacity: 0.6 },
-      compLineValue: { flex: '0 0 auto', fontVariantNumeric: 'tabular-nums', minWidth: '70px', textAlign: 'right' },
+      // 数值列定宽，两条 bar 的轨道才能严格等宽，比例尺才对得齐。
+      compLineValue: { flex: '0 0 80px', width: '80px', fontVariantNumeric: 'tabular-nums', textAlign: 'right' },
       compGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '2px 18px', marginTop: '10px' },
       compItem: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', lineHeight: '20px', minWidth: '0' },
       compCell: { fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: '44px' },
@@ -763,21 +766,41 @@ window.__ModuleLoader__.load({
         return Math.round((chars || 0) / 4)
       }
 
-      function barLine(label, bucket, total) {
-        return h('div', { style: C.compLine },
-          h('span', { style: C.compLineLabel }, label),
-          h('div', { style: Object.assign({}, C.compBar, { flex: '1 1 0' }) }, categories.map(function (category) {
+      // 两条 bar 共用一条比例尺：以不折叠的总量为满格，折叠后按比例缩短。
+      // 这样长度差本身就是省下的量，而不是两条各自铺满 100% 只比内部色块。
+      function barLine(label, bucket, total, scale, markerRatio) {
+        var ratio = scale > 0 ? Math.max(0, Math.min(1, (total || 0) / scale)) : 0
+        var fill = h('div', { style: Object.assign({}, C.compFill, { width: (100 * ratio) + '%' }) },
+          categories.map(function (category) {
             var value = bucket[category.key] || 0
             if (!(value > 0)) return null
             return h('div', {
               key: category.key,
               title: category.label + ' ' + formatChars(value) + ' ≈ ' + formatTokens(tokensOf(value)) + ' token',
               style: Object.assign({}, C.compSeg, {
-                width: (100 * value / (total || 1)) + '%',
+                width: (total > 0 ? 100 * value / total : 0) + '%',
                 background: compositionColor(category.key),
               }),
             })
-          })),
+          }))
+        var trackProps = {
+          style: Object.assign({}, C.compBar, { flex: '1 1 0' }),
+          title: label + '合计 ' + formatTokens(tokensOf(total)) + ' token（满格 = 不折叠总量）',
+        }
+        // 在不折叠那条上画一道竖线，标出「折叠后只保留到这里」的位置。
+        var track = null
+        if (typeof markerRatio === 'number' && markerRatio > 0 && markerRatio < 1) {
+          track = h('div', trackProps, fill, h('div', {
+            key: 'mark',
+            title: '折叠后保留 ' + percent(markerRatio) + '，其余被折掉',
+            style: Object.assign({}, C.compMark, { left: (100 * markerRatio).toFixed(2) + '%' }),
+          }))
+        } else {
+          track = h('div', trackProps, fill)
+        }
+        return h('div', { style: C.compLine },
+          h('span', { style: C.compLineLabel }, label),
+          track,
           h('span', { style: C.compLineValue }, formatTokens(tokensOf(total)) + ' token')
         )
       }
@@ -802,6 +825,7 @@ window.__ModuleLoader__.load({
       }
 
       var saveRate = foldedTotal > 0 ? 1 - foldedTotal / (unfoldedTotal || 1) : 0
+      var barScale = Math.max(foldedTotal, unfoldedTotal)
       // 构成与趋势左右并排：两张图各自窄一点才看得出形状，宽屏也不会被拉成一整条横线。
       // 容器窄时 auto-fit 自动落回上下排。
       return h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '12px', alignItems: 'start' } },
@@ -811,10 +835,10 @@ window.__ModuleLoader__.load({
               h('div', { style: C.sectionTitle }, '上下文构成'),
               h('div', { style: C.sub }, '折叠后 ' + formatTokens(tokensOf(foldedTotal)) + ' token · 不折叠 ' + formatTokens(tokensOf(unfoldedTotal)) + ' · 省 ' + percent(saveRate))
             ),
-            h('div', { style: C.sub }, '按用途分类；图例数值为「折叠后 / 不折叠」')
+            h('div', { style: C.sub }, '按用途分类；两条同比例尺，长度差就是省下的量（图例：折叠后 / 不折叠）')
           ),
-          barLine('折叠后', folded, foldedTotal),
-          barLine('不折叠', unfolded, unfoldedTotal),
+          barLine('折叠后', folded, foldedTotal, barScale, 0),
+          barLine('不折叠', unfolded, unfoldedTotal, barScale, unfoldedTotal > 0 ? foldedTotal / unfoldedTotal : 0),
           h('div', { style: C.compGrid }, legend)
         ),
         h('div', { style: C.section },

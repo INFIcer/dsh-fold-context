@@ -155,6 +155,20 @@ test('构成面板、图表与重要消息行能渲染（冒烟）', () => {
   const text = JSON.stringify(panel) + JSON.stringify(turn)
   assert.ok(text.includes('折叠后'))
   assert.ok(text.includes('重要消息'))
+  // 两条构成 bar 共用比例尺：不折叠铺满，折叠后按总量比例缩短，长度差就是省下的量
+  const section = panel.children[0]
+  const foldedLine = section.children[1]
+  const unfoldedLine = section.children[2]
+  const foldedFill = foldedLine.children[1].children[0]
+  const unfoldedTrack = unfoldedLine.children[1]
+  const unfoldedFill = unfoldedTrack.children[0]
+  const foldedWidth = parseFloat(foldedFill.props.style.width)
+  const unfoldedWidth = parseFloat(unfoldedFill.props.style.width)
+  assert.equal(unfoldedWidth, 100)
+  assert.ok(foldedWidth > 0 && foldedWidth < 10, '折叠后的条应明显短于不折叠：' + foldedWidth + '%')
+  // 不折叠条上有一道竖线，标出折叠后保留到的位置
+  assert.equal(unfoldedTrack.children.length, 2)
+  assert.equal(unfoldedTrack.children[1].props.style.left, foldedWidth.toFixed(2) + '%')
 })
 
 test('参数表单只挂在插件页，折叠 tab 不再有设置入口', () => {
