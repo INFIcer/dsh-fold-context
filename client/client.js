@@ -115,6 +115,21 @@ window.__ModuleLoader__.load({
       fieldDesc: { fontSize: '11px', opacity: 0.62, margin: '3px 0 6px', lineHeight: '17px' },
       input: { fontSize: '12px', padding: '4px 8px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.4)', background: 'rgba(128,128,128,.08)', color: 'inherit', width: '180px', fontVariantNumeric: 'tabular-nums' },
       textarea: { fontSize: '12px', padding: '6px 8px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.4)', background: 'rgba(128,128,128,.08)', color: 'inherit', width: '100%', boxSizing: 'border-box', lineHeight: '18px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' },
+      entrySummary: { padding: '5px 8px', cursor: 'pointer', listStyle: 'none' },
+      entryPeek: { fontSize: '11px', opacity: 0.6, marginTop: '2px', lineHeight: '17px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+      entryBody: { padding: '0 8px 8px' },
+      blockBox: { padding: '6px 8px', margin: '5px 0', borderRadius: '6px' },
+      blockWide: { maxHeight: 'none' },
+      nestedBody: { marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px' },
+      itemBox: { border: '1px solid rgba(128,128,128,.18)', borderRadius: '6px', padding: '4px 6px' },
+      itemSummary: { fontSize: '11px', cursor: 'pointer', opacity: 0.72, fontVariantNumeric: 'tabular-nums' },
+      itemBody: { paddingTop: '2px' },
+      hunkHead: { fontSize: '11px', opacity: 0.6, marginTop: '6px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' },
+      diffBox: { fontSize: '11px', lineHeight: '16px', borderRadius: '6px', overflow: 'auto', maxHeight: '320px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' },
+      diffLine: { padding: '0 6px' },
+      diffAdd: { background: 'rgba(52,211,153,.14)' },
+      diffDel: { background: 'rgba(248,113,113,.14)' },
+      diffFull: { marginTop: '8px' },
     }
 
     var KIND_COLORS = {
@@ -221,25 +236,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function Pins(props) {
-      var pins = props.pins || []
-      if (pins.length === 0) {
-        return h('div', { style: C.notice }, '还没有重要消息。需要长期复用的结论用 fold_pin 固化，它永不折叠，但会一直占着上下文。')
-      }
-      return h('div', {}, pins.map(function (pin) {
-        var text = String(pin.text || '')
-        var short = text.length > 120 ? text.slice(0, 120) + '…' : text
-        return h('div', { key: pin.id + ':' + pin.at, style: C.pinLine },
-          h('div', { style: { display: 'flex', gap: '10px', alignItems: 'baseline' } },
-            h('span', { style: { fontWeight: 600 } }, pin.id),
-            h('span', { style: Object.assign({}, C.mono, { opacity: 0.55 }) }, 'T' + pin.turn + ' · ' + formatChars(pin.chars) + ' · ' + formatTokens(-pin.tokens) + ' token'),
-            pin.estimated ? h('span', { style: { opacity: 0.45, fontSize: '11px' } }, '（旧记录，轮次按估算）') : null
-          ),
-          h('div', { style: { opacity: 0.7, marginTop: '2px', whiteSpace: 'pre-wrap' } }, short)
-        )
-      }))
-    }
-
     // ---------- 账本 ----------
     function Ledger(props) {
       var sessionId = props.sessionId
@@ -328,37 +324,91 @@ window.__ModuleLoader__.load({
         h(FoldTable, { rows: data.rows || [] })
       )
 
-      var pinsSection = h('div', { style: C.section },
-        h('div', { style: C.sectionHead },
-          h('div', { style: C.sectionTitle }, '重要消息'),
-          h('div', { style: C.sub }, '永不折叠，长期占用上下文')
-        ),
-        h(Pins, { pins: data.pins || [] })
-      )
-
       var footnote = h('div', { style: { fontSize: '11px', opacity: 0.5, lineHeight: '18px' } },
         '估算口径与宿主 token-meter 一致：每 ' + (data.estimate ? data.estimate.charsPerToken : 4) + ' 字符算 1 token，每个文本块再加 ' + (data.estimate ? data.estimate.blockOverhead : 4) + ' token 开销。'
       )
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, toolbar, errorLine, kpis, chartSection, tableSection, pinsSection, footnote)
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, toolbar, errorLine, kpis, chartSection, tableSection, footnote)
     }
 
     // ---------- 模型视角 ----------
+    // 这里的「折叠」只是界面收起，与插件的折叠压缩无关：收起时正文不挂进 DOM，
+    // 一次展开一个才渲染一个，避免几万字一次铺开导致页面卡顿。
+
+    function useLazyOpen() {
+      var state = react.useState(false)
+      return [state[0], function (event) {
+        var next = event && event.currentTarget ? event.currentTarget.open === true : !state[0]
+        if (next !== state[0]) state[1](next)
+      }]
+    }
+
+    function firstTextOf(entry) {
+      var blocks = Array.isArray(entry && entry.blocks) ? entry.blocks : []
+      for (var i = 0; i < blocks.length; i += 1) {
+        var text = blocks[i] && typeof blocks[i].text === 'string' ? blocks[i].text : ''
+        if (text) return text
+      }
+      return ''
+    }
+
+    function blocksOfGroup(group) {
+      var out = []
+      var entries = Array.isArray(group && group.entries) ? group.entries : []
+      for (var i = 0; i < entries.length; i += 1) {
+        var blocks = Array.isArray(entries[i] && entries[i].blocks) ? entries[i].blocks : []
+        for (var j = 0; j < blocks.length; j += 1) out.push(blocks[j])
+      }
+      return out
+    }
+
     function BlockView(props) {
       var block = props.block || {}
       var kind = block.kind || 'text'
       var text = typeof block.text === 'string' ? block.text : ''
       var label = BLOCK_LABELS[kind] || '文本'
       if (kind === 'call' && block.name) label += ' ' + block.name
-      return h('div', { style: Object.assign({}, tint(kind), { padding: '6px 8px', margin: '5px 0', borderRadius: '6px' }) },
+      return h('div', { style: Object.assign({}, tint(kind), C.blockBox) },
         h('div', { style: C.blockHead }, label + ' · ' + text.length + ' 字'),
-        h('div', { style: Object.assign({}, C.blockText, props.wide ? {} : C.blockClip) }, text || '（空）')
+        h('div', { style: Object.assign({}, C.blockText, props.wide ? C.blockWide : C.blockClip) }, text || '（空）')
+      )
+    }
+
+    function BlockList(props) {
+      var blocks = Array.isArray(props.blocks) ? props.blocks : []
+      return blocks.map(function (block, index) {
+        return h(BlockView, { key: 'b' + index, block: block, wide: props.wide })
+      })
+    }
+
+    function FoldItem(props) {
+      var item = props.item || {}
+      var opened = useLazyOpen()
+      var seq = item.seq === null || item.seq === undefined ? '?' : item.seq
+      var head = '第 ' + props.index + ' 段 · #' + seq + ' · ' + formatChars(item.chars)
+      return h('details', { style: C.itemBox, onToggle: opened[1] },
+        h('summary', { style: C.itemSummary }, head),
+        opened[0] ? h('div', { style: C.itemBody }, h(BlockList, { blocks: item.blocks, wide: props.wide })) : null
+      )
+    }
+
+    // 被折叠掉的原文：逐段再折一层，点开一段才挂一段，212 段也不会一次进 DOM。
+    function FoldOriginal(props) {
+      var record = props.record || {}
+      var items = Array.isArray(record.items) ? record.items : []
+      var opened = useLazyOpen()
+      return h('details', { style: C.nested, onToggle: opened[1] },
+        h('summary', { style: C.nestedSummary }, '折叠掉的原文 · ' + items.length + ' 段（模型看不到，仅供对照）'),
+        opened[0] ? h('div', { style: C.nestedBody }, items.map(function (item, index) {
+          return h(FoldItem, { key: 'i' + index, item: item, index: index + 1, wide: props.wide })
+        })) : null
       )
     }
 
     function EntryView(props) {
       var entry = props.entry || {}
       var kind = entryKindOf(entry)
+      var opened = useLazyOpen()
       var role = entry.isCheckpoint
         ? '折叠摘要 ' + (entry.foldId || '')
         : entry.isPin
@@ -368,74 +418,171 @@ window.__ModuleLoader__.load({
       if (entry.sourceLabel) meta.push(entry.sourceLabel)
       if (entry.seq !== null && entry.seq !== undefined) meta.push('#' + entry.seq)
       meta.push(formatChars(entry.chars))
-      var body = []
-      var blocks = Array.isArray(entry.blocks) ? entry.blocks : []
-      for (var i = 0; i < blocks.length; i += 1) {
-        body.push(h(BlockView, { key: 'b' + i, block: blocks[i], wide: props.wide }))
-      }
       var record = entry.foldRecord
-      if (entry.isCheckpoint && record && Array.isArray(record.items) && record.items.length > 0) {
-        var original = []
-        for (var j = 0; j < record.items.length; j += 1) {
-          var item = record.items[j]
-          var itemBlocks = Array.isArray(item.blocks) ? item.blocks : []
-          for (var k = 0; k < itemBlocks.length; k += 1) {
-            original.push(h(BlockView, { key: 'o' + j + '-' + k, block: itemBlocks[k], wide: props.wide }))
-          }
-        }
-        body.push(h('details', { key: 'origin', style: C.nested },
-          h('summary', { style: C.nestedSummary }, '折叠掉的原文 · ' + record.items.length + ' 段（模型看不到，仅供对照）'),
-          original
-        ))
-      }
-      return h('div', { style: Object.assign({}, C.entry, tint(kind)) },
+      var hasOriginal = entry.isCheckpoint && record && Array.isArray(record.items) && record.items.length > 0
+      var summary = h('summary', { style: C.entrySummary },
         h('div', { style: C.entryHead },
           h('span', { style: C.entryRole }, role),
           meta.map(function (text, index) { return h('span', { key: 'm' + index, style: C.entryMeta }, text) })
         ),
-        body
+        h('div', { style: C.entryPeek }, preview(firstTextOf(entry), 140) || '（空）')
       )
+      return h('details', { style: Object.assign({}, C.entry, tint(kind)), onToggle: opened[1] },
+        summary,
+        opened[0]
+          ? h('div', { style: C.entryBody },
+              h(BlockList, { blocks: entry.blocks, wide: props.wide }),
+              hasOriginal ? h(FoldOriginal, { record: record, wide: props.wide }) : null
+            )
+          : null
+      )
+    }
+
+    // 逐行渲染差异：+ 绿、− 红、上下文原样，超长行在服务端已截断并标注。
+    function DiffView(props) {
+      var diff = props.diff || {}
+      if (diff.same) return [h('div', { key: 'same', style: C.sub }, '与上一版逐行一致。')]
+      var hunks = Array.isArray(diff.hunks) ? diff.hunks : []
+      if (hunks.length === 0) return [h('div', { key: 'none', style: C.sub }, '没有可显示的差异。')]
+      var out = []
+      for (var hi = 0; hi < hunks.length; hi += 1) {
+        var hunk = hunks[hi] || {}
+        out.push(h('div', { key: 'h' + hi, style: C.hunkHead },
+          '@@ -' + hunk.aStart + ',' + hunk.aLines + ' +' + hunk.bStart + ',' + hunk.bLines + ' @@'))
+        var lines = Array.isArray(hunk.lines) ? hunk.lines : []
+        var rows = []
+        for (var li = 0; li < lines.length; li += 1) {
+          var line = lines[li] || {}
+          var t = line.t === 'add' || line.t === 'del' ? line.t : 'ctx'
+          var style = t === 'add'
+            ? Object.assign({}, C.diffLine, C.diffAdd)
+            : t === 'del'
+              ? Object.assign({}, C.diffLine, C.diffDel)
+              : C.diffLine
+          rows.push(h('div', { key: 'l' + li, style: style }, (t === 'add' ? '+ ' : t === 'del' ? '− ' : '  ') + (line.text || '')))
+        }
+        out.push(h('div', { key: 'hb' + hi, style: C.diffBox }, rows))
+      }
+      if (diff.truncated) out.push(h('div', { key: 'tr', style: C.sub }, '（差异过多，只显示前 ' + hunks.length + ' 段）'))
+      if (diff.clipped) out.push(h('div', { key: 'cl', style: C.sub }, '（有超长行被截断，只显示每行开头）'))
+      return out
+    }
+
+    // 系统提示词按出现时间单独成卡：第一版看全文，之后默认只看变化。
+    function SystemCard(props) {
+      var group = props.group || {}
+      var version = typeof group.version === 'number' && group.version > 0 ? group.version : 1
+      var diff = group.diff || null
+      var opened = useLazyOpen()
+      var fullState = react.useState(false)
+      var tags = [
+        h('span', { key: 'v', style: C.tag }, '第 ' + version + ' 版'),
+        h('span', { key: 'nf', style: C.tag }, '不折叠'),
+      ]
+      if (version > 1) {
+        tags.push(h('span', { key: 'd', style: C.tag }, diff ? (diff.same ? '与上一版一致' : '+' + diff.add + ' −' + diff.del) : '无差异数据'))
+      }
+      var summary = h('summary', { style: C.turnSummary },
+        h('div', { style: C.turnHead },
+          h('span', { style: C.turnNo }, '系统提示词'),
+          tags,
+          h('span', { style: C.turnMeta }, formatChars(group.chars) + ' 字 · ' + (group.entries || []).length + ' 条')
+        ),
+        h('div', { style: C.peek },
+          h('span', { style: C.peekKey }, '内容'),
+          h('span', {}, preview(firstTextOf((group.entries || [])[0] || {}), 140))
+        )
+      )
+      var body = null
+      if (opened[0]) {
+        if (version > 1 && diff && !diff.same) {
+          var showFull = fullState[0]
+          body = h('div', { style: C.turnBody },
+            DiffView({ diff: diff }),
+            showFull
+              ? h('div', { style: C.diffFull }, h(BlockList, { blocks: blocksOfGroup(group), wide: props.wide }))
+              : h('button', { style: Object.assign({}, C.button, { marginTop: '8px' }), onClick: function () { fullState[1](true) } }, '查看这一版全文')
+          )
+        } else {
+          body = h('div', { style: C.turnBody },
+            diff && diff.same ? h('div', { style: C.sub }, '与上一版逐行一致。') : null,
+            h(BlockList, { blocks: blocksOfGroup(group), wide: props.wide })
+          )
+        }
+      }
+      return h('details', { style: C.turn, onToggle: opened[1] }, summary, body)
+    }
+
+    // 重要消息：永不折叠，跟着轮次排在这里而不是账本末尾。
+    function PinsPanel(props) {
+      var pins = Array.isArray(props.pins) ? props.pins : []
+      var opened = useLazyOpen()
+      var totalChars = 0
+      for (var i = 0; i < pins.length; i += 1) totalChars += pins[i].chars || 0
+      var latest = pins.length > 0 ? String(pins[pins.length - 1].label || '') : ''
+      var summary = h('summary', { style: C.turnSummary },
+        h('div', { style: C.turnHead },
+          h('span', { style: C.turnNo }, '重要消息'),
+          h('span', { style: C.tag }, pins.length + ' 条'),
+          h('span', { style: C.turnMeta }, pins.length ? '共 ' + formatChars(totalChars) + ' · 永不折叠' : '还没有')
+        ),
+        pins.length ? h('div', { style: C.peek }, h('span', { style: C.peekKey }, '最新'), h('span', {}, preview(latest, 80))) : null
+      )
+      var body = null
+      if (opened[0]) {
+        body = h('div', { style: C.turnBody }, pins.length === 0
+          ? h('div', { style: C.notice }, '还没有重要消息。需要长期复用的结论用 fold_pin 固化，它永不折叠，但会一直占着上下文。')
+          : pins.map(function (pin, index) {
+              var meta = (typeof pin.turn === 'number' ? 'T' + pin.turn : '—') + ' · ' + formatChars(pin.chars)
+              if (pin.seq !== null && pin.seq !== undefined) meta += ' · #' + pin.seq
+              return h('div', { key: 'p' + index, style: Object.assign({}, C.entry, tint('pin')) },
+                h('div', { style: C.entryHead },
+                  h('span', { style: C.entryRole }, pin.label),
+                  h('span', { style: C.entryMeta }, meta)
+                ),
+                h(BlockList, { blocks: pin.blocks, wide: props.wide })
+              )
+            }))
+      }
+      return h('details', { style: C.turn, onToggle: opened[1] }, summary, body)
     }
 
     function TurnCard(props) {
       var group = props.group || {}
-      var isSystem = group.kind === 'system'
-      var label = isSystem ? '系统提示词' : (typeof group.turn === 'number' ? '第 ' + group.turn + ' 轮' : '第 ' + (group.ordinal || 0) + ' 段')
+      if (group.kind === 'system') return h(SystemCard, { group: group, wide: props.wide })
+      var opened = useLazyOpen()
+      var label = typeof group.turn === 'number' ? '第 ' + group.turn + ' 轮' : '第 ' + (group.ordinal || 0) + ' 段'
       var tags = []
-      if (isSystem) {
-        tags.push(h('span', { key: 'sys', style: C.tag }, '不折叠 · 全文'))
-      } else {
-        var foldIds = Array.isArray(group.foldIds) ? group.foldIds : []
-        for (var i = 0; i < foldIds.length; i += 1) tags.push(h('span', { key: 'f' + i, style: C.tag }, foldIds[i]))
-        if (group.continuation) tags.push(h('span', { key: 'cont', style: C.tag }, '轮内续接'))
-        if (group.folded) tags.push(h('span', { key: 'folded', style: C.tag }, '已折叠'))
-        else if (group.prePlugin) tags.push(h('span', { key: 'pre', style: C.tag }, '插件生效前 · 未折叠'))
-        else tags.push(h('span', { key: 'none', style: C.tag }, group.short ? '内容较少 · 未折叠' : '未折叠'))
-      }
-      var meta = isSystem
-        ? formatChars(group.chars) + ' 字'
-        : (group.steps || 0) + ' 步 · ' + formatChars(group.chars) + (group.folded ? ' ← 原文 ' + formatChars(group.unfoldedChars) : '')
+      var foldIds = Array.isArray(group.foldIds) ? group.foldIds : []
+      for (var i = 0; i < foldIds.length; i += 1) tags.push(h('span', { key: 'f' + i, style: C.tag }, foldIds[i]))
+      if (group.continuation) tags.push(h('span', { key: 'cont', style: C.tag }, '轮内续接'))
+      if (group.folded) tags.push(h('span', { key: 'folded', style: C.tag }, '已折叠'))
+      else if (group.prePlugin) tags.push(h('span', { key: 'pre', style: C.tag }, '插件生效前 · 未折叠'))
+      else tags.push(h('span', { key: 'none', style: C.tag }, group.short ? '内容较少 · 未折叠' : '未折叠'))
+      var meta = (group.steps || 0) + ' 步 · ' + formatChars(group.chars) + (group.folded ? ' ← 原文 ' + formatChars(group.unfoldedChars) : '')
       var summary = h('summary', { style: C.turnSummary },
         h('div', { style: C.turnHead },
           h('span', { style: C.turnNo }, label),
           tags,
           h('span', { style: C.turnMeta }, meta)
         ),
-        isSystem ? null : h('div', { style: C.peek },
+        h('div', { style: C.peek },
           h('span', { style: C.peekKey }, '用户'),
           h('span', {}, preview(group.userText, 150))
         ),
-        isSystem ? null : h('div', { style: C.peek },
+        h('div', { style: C.peek },
           h('span', { style: C.peekKey }, '回复'),
           h('span', {}, preview(group.replyText || group.replyNote || '', 150))
         )
       )
       var entries = Array.isArray(group.entries) ? group.entries : []
-      return h('details', { style: C.turn },
+      return h('details', { style: C.turn, onToggle: opened[1] },
         summary,
-        h('div', { style: C.turnBody }, entries.map(function (entry, index) {
-          return h(EntryView, { key: 'e' + index, entry: entry, wide: props.wide })
-        }))
+        opened[0]
+          ? h('div', { style: C.turnBody }, entries.map(function (entry, index) {
+              return h(EntryView, { key: 'e' + index, entry: entry, wide: props.wide })
+            }))
+          : null
       )
     }
 
@@ -472,7 +619,7 @@ window.__ModuleLoader__.load({
 
       var data = payload.data
       var toolbar = h('div', { style: C.row },
-        h('div', { style: C.sub }, '这是 session.deriveMessages() 派生的真实请求历史：折叠检查点就是模型实际看到的样子；展开检查点可对照被替换掉的原文。'),
+        h('div', { style: C.sub }, '这是 session.deriveMessages() 派生的真实请求历史：折叠检查点就是模型实际看到的样子；点开一轮才渲染正文，避免长历史卡顿。'),
         h('div', { style: { flex: 1 } }),
         h('label', { style: Object.assign({}, C.sub, { cursor: 'pointer' }) },
           h('input', { type: 'checkbox', checked: wide[0], onChange: function (event) { wide[1](event.target.checked) } }),
@@ -501,6 +648,7 @@ window.__ModuleLoader__.load({
         toolbar,
         notice,
         warns.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, warns) : null,
+        h(PinsPanel, { pins: data.pins || [], wide: wide[0] }),
         groups.map(function (group, index) {
           return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0] })
         })

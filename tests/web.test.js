@@ -215,6 +215,35 @@ test('view 路由返回逐轮 JSON，且不带整段原文', () => {
   assert.ok(JSON.stringify(body).includes('先看目录'))
 })
 
+test('view 路由带上重要消息，以及系统提示词的版本与差异', () => {
+  const messages = [
+    { id: 's1', role: 'system', content: [{ type: 'text', text: 'a\nb\nc' }], source: { kind: 'system' } },
+    ...demoMessages,
+    { id: 's2', role: 'system', content: [{ type: 'text', text: 'a\nB\nc' }], source: { kind: 'system' } },
+    { id: 'p1', role: 'user', content: [{ type: 'text', text: '【重要·永不折叠】 结论' }], source: { kind: 'fold-pin', label: '结论' } },
+  ]
+  const handler = createViewHandler({
+    resolveSessionById: () => fakeSession('s3', messages),
+    makeStore: () => makeStore([]),
+    getConfig: () => ({}),
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq(viewPath + '?session=s3'), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  const systems = body.groups.filter((group) => group.kind === 'system')
+  assert.equal(systems.length, 2)
+  assert.equal(systems[0].version, 1)
+  assert.equal(systems[0].diff, null)
+  assert.equal(systems[1].version, 2)
+  assert.equal(systems[1].diff.add, 1)
+  assert.equal(systems[1].diff.del, 1)
+  assert.deepEqual(body.pins.map((pin) => pin.label), ['结论'])
+  assert.ok(body.pins[0].blocks.length > 0)
+  assert.equal(body.version, 2)
+})
+
 test('view 路由缺参数 400、找不到会话 404', () => {
   const handler = createViewHandler({ resolveSessionById: () => undefined, makeStore: () => makeStore([]), getConfig: () => ({}), log: quietLog })
   const missing = fakeRes()

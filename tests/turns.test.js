@@ -75,7 +75,7 @@ test('entryKindOf 认得调度器投递的用户指令', () => {
   assert.equal(entryKindOf(entry({ isPin: true })), 'pin')
 })
 
-test('系统提示词抽成单独一块，绝不进任何一轮', () => {
+test('系统提示词按出现时间单独成块，绝不进任何一轮', () => {
   const groups = buildTurnGroups({
     entries: [
       entry({ role: 'system', chars: 100, text: '系统' }),
@@ -84,14 +84,15 @@ test('系统提示词抽成单独一块，绝不进任何一轮', () => {
     ],
     minFoldChars: 1000,
   })
-  assert.equal(groups[0].kind, 'system')
+  assert.deepEqual(groups.map((group) => group.kind), ['system', 'turn'])
   assert.equal(groups[0].chars, 100)
-  assert.equal(groups.length, 2)
+  assert.equal(groups[0].version, 1)
+  assert.equal(groups[0].diff, null)
   assert.equal(groups[1].turn, 1)
   assert.deepEqual(groups[1].entries.map((item) => item.role), ['user', 'assistant'])
 })
 
-test('中间出现的系统消息也抽走，不打断当前轮', () => {
+test('轮中出现的系统提示词就地切开当前轮，不并入相邻轮', () => {
   const groups = buildTurnGroups({
     entries: [
       userEntry('第一句'),
@@ -101,11 +102,29 @@ test('中间出现的系统消息也抽走，不打断当前轮', () => {
     ],
     minFoldChars: 1,
   })
+  assert.deepEqual(groups.map((group) => group.kind), ['turn', 'system', 'turn'])
   const turnGroups = groups.filter((group) => group.kind === 'turn')
-  assert.equal(turnGroups.length, 1)
-  assert.equal(turnGroups[0].entries.length, 3)
-  assert.equal(groups[0].kind, 'system')
-  assert.equal(groups[0].entries.length, 1)
+  assert.equal(turnGroups.length, 2)
+  assert.equal(turnGroups[0].entries.length, 2)
+  assert.equal(turnGroups[1].entries.length, 1)
+})
+
+test('后一版系统提示词只带与前一版的差异，且系统块不参与轮次编号', () => {
+  const groups = buildTurnGroups({
+    entries: [
+      entry({ role: 'system', chars: 5, text: 'a\nb\nc' }),
+      userEntry('第一句'),
+      assistantEntry('答一句'),
+      entry({ role: 'system', chars: 5, text: 'a\nB\nc' }),
+    ],
+    minFoldChars: 1,
+  })
+  assert.deepEqual(groups.map((group) => group.kind), ['system', 'turn', 'system'])
+  assert.equal(groups[2].version, 2)
+  assert.equal(groups[2].diffOf, 1)
+  assert.equal(groups[2].diff.add, 1)
+  assert.equal(groups[2].diff.del, 1)
+  assert.equal(groups.filter((group) => group.kind === 'turn').length, 1)
 })
 
 test('轮结束后落地的折叠检查点归上一轮，不另开一轮', () => {
