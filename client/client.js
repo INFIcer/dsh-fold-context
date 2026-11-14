@@ -313,11 +313,24 @@ window.__ModuleLoader__.load({
       return text
     }
 
+    // 校准：成本模型的两个系数是用 provider 回报反推的，页面要写清楚它从哪来，
+    // 否则读者会以为那是一个手调的折扣，进而怀疑整套账单。
+    function calibrationNote(cost) {
+      var cal = (cost && cost.calibration) || null
+      var measured = cost && typeof cost.measuredHitRate === 'number'
+      var rate = cost && typeof cost.hitRate === 'number' ? cost.hitRate : 0.97
+      var text = '命中率 ' + percent(rate) + (measured ? '（provider 实测）' : '（默认值）')
+      if (!cal || !cal.coveredTurns) {
+        return text + '；还没有 provider 回报，校准系数按 1 计，估算可能偏高'
+      }
+      return text + '；按 ' + cal.coveredTurns + ' 轮回报反推校准：提示词 ×' + Number(cal.promptScale).toFixed(2) + '、输出 ×' + Number(cal.outputScale).toFixed(2)
+    }
+
     function CostSection(props) {
       var cost = props.cost || {}
       var totals = cost.totals || {}
       var latest = cost.latest || null
-      var prices = cost.prices || { cacheHit: 0.2, input: 2, output: 3 }
+      var prices = cost.prices || { cacheHit: 0.02, input: 1, output: 4 }
       var rows = Array.isArray(cost.turns) ? cost.turns : []
       // 三档分开结算：各自乘自己的单价，加起来才是这一份历史的账单。
       // 输出在两种视角里是同一句回复，所以两边一样、净省为 0；列出来是为了把账凑齐。
@@ -428,6 +441,7 @@ window.__ModuleLoader__.load({
           h('div', { style: C.sub }, priceLine(prices))
         ),
         kpis,
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, calibrationNote(cost)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, costDriftNote(cost.drift)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。检查点按未命中计，命中从上一个切点算起。'),
         h('div', { style: Object.assign({}, C.sub, { margin: '10px 0 4px' }) }, '按类别拆分（估算）'),
@@ -1429,6 +1443,7 @@ window.__ModuleLoader__.load({
       TurnCard: TurnCard,
       entryKindOf: entryKindOf,
       costDriftNote: costDriftNote,
+      calibrationNote: calibrationNote,
       CostSection: CostSection,
       formatMoney: formatMoney,
     }

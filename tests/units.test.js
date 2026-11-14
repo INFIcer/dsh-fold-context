@@ -255,9 +255,10 @@ test('normalizeConfig 覆盖新增字段的钳制与类型守卫', () => {
 
 test('单价字段有默认值，越界钳制，严格校验拒绝非数字', () => {
   const base = defaultConfig()
-  assert.equal(base.priceCacheHitInput, 0.2)
-  assert.equal(base.priceInput, 2)
-  assert.equal(base.priceOutput, 3)
+  assert.equal(base.priceCacheHitInput, 0.02)
+  assert.equal(base.priceInput, 1)
+  assert.equal(base.priceOutput, 4)
+  assert.equal(base.cacheHitRate, 0.97)
 
   const clamped = normalizeConfig({ priceOutput: 9999, priceInput: -5 })
   assert.equal(clamped.priceOutput, 1000)
@@ -282,22 +283,24 @@ test('单价字段有默认值，越界钳制，严格校验拒绝非数字', ()
 
 test('pricing 用默认价兜底，金额按百万 token 折算', () => {
   const prices = pricesOf({})
-  assert.deepEqual(prices, { cacheHit: 0.2, input: 2, output: 3 })
+  assert.deepEqual(prices, { cacheHit: 0.02, input: 1, output: 4 })
   // 非法与缺项都退回默认，不让 NaN 流进金额。
-  assert.deepEqual(pricesOf({ priceInput: 'x', priceOutput: NaN }), { cacheHit: 0.2, input: 2, output: 3 })
+  assert.deepEqual(pricesOf({ priceInput: 'x', priceOutput: NaN }), { cacheHit: 0.02, input: 1, output: 4 })
 
   assert.equal(yuanOf(1000000, 2), 2)
   assert.equal(roundMoney(2.3456789), 2.345679)
   assert.deepEqual(moneyOf({ hit: 1000000, input: 1000000, output: 1000000 }, prices), {
-    cacheHit: 0.2,
-    input: 2,
-    output: 3,
-    total: 5.2,
+    cacheHit: 0.02,
+    input: 1,
+    output: 4,
+    total: 5.02,
   })
-  // 加权输入均价：命中占比越高越便宜。
-  assert.equal(blendedInputPrice(prices, 0), 2)
-  assert.equal(blendedInputPrice(prices, 1), 0.2)
-  assert.equal(blendedInputPrice(prices, 0.5), 1.1)
+  // 加权输入均价：命中占比越高越便宜；默认命中率 0.97 时几乎等于命中价。
+  assert.equal(blendedInputPrice(prices, 0), 1)
+  assert.equal(blendedInputPrice(prices, 1), 0.02)
+  assert.equal(blendedInputPrice(prices, 0.5), 0.51)
+  assert.equal(blendedInputPrice(prices), 0.0494)
+  assert.equal(blendedInputPrice(prices, 0.97), roundMoney(0.02 * 0.97 + 1 * 0.03))
 })
 
 test('normalizeConfig 忽略未知键并回调 warn', () => {

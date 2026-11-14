@@ -95,6 +95,6 @@ test('没有记录时给空账本而不是报错', () => {
     money: 0,
   })
   // 空账本也要给出单价，页面不必自己兜底。
-  assert.equal(stats.pricing.prices.input, 2)
-  assert.equal(stats.pricing.cacheHitRatio, 0.25)
+  assert.equal(stats.pricing.prices.input, 1)
+  assert.equal(stats.pricing.cacheHitRate, 0.97)
 })

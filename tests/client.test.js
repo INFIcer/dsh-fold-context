@@ -279,3 +279,21 @@ test('参数表单只挂在插件页，折叠 tab 不再有设置入口', () => 
   // 两张图左右并排，窄屏自动堆叠，不再被拉成一整条
   assert.ok(source.includes('repeat(auto-fit, minmax(320px, 1fr))'))
 })
+test('账单页写明命中率与校准来源', () => {
+  const { module } = loadClient()
+  const note = module.__test.calibrationNote({
+    hitRate: 0.975,
+    measuredHitRate: 0.975,
+    calibration: { coveredTurns: 6, promptScale: 0.48, outputScale: 1.92 },
+  })
+  assert.ok(note.includes('命中率 97.5%（provider 实测）'), note)
+  assert.ok(note.includes('按 6 轮回报反推校准'), note)
+  assert.ok(note.includes('提示词 ×0.48'), note)
+  assert.ok(note.includes('输出 ×1.92'), note)
+  const cold = module.__test.calibrationNote({})
+  assert.ok(cold.includes('（默认值）'), cold)
+  assert.ok(cold.includes('按 1 计'), cold)
+  // 没给 prices 时用空闲时段默认价，不退回 V3.2 那套。
+  const section = module.__test.CostSection({ cost: { totals: {}, turns: [] } })
+  assert.ok(JSON.stringify(section).includes('命中 ¥0.02'), JSON.stringify(section).slice(0, 400))
+})
