@@ -95,6 +95,52 @@ test('按轮去重 usage，同一轮折成多段只算一次', () => {
   assert.equal(cost.totals.actualSteps, 3)
 })
 
+test('同一轮被切成两组时合并成一行，不重复计费', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 3, steps: 2, chars: 1200, checkpointChars: 200, unfoldedChars: 60000 }),
+    turn({ turn: 3, steps: 3, chars: 300, checkpointChars: 100, unfoldedChars: 5000 }),
+  ]
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRatio: 0.25 } })
+  assert.equal(cost.turns.length, 1)
+  const row = cost.turns[0]
+  assert.equal(row.turn, 3)
+  assert.equal(row.steps, 5)
+  assert.equal(row.foldedChars, 1500)
+  assert.equal(row.checkpointChars, 300)
+  assert.equal(row.unfoldedChars, 65000)
+})
+
+test('只有最后一条系统提示计入开销，旧版副本不计', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    { kind: 'system', chars: 6000 },
+    turn({ turn: 1, steps: 1, chars: 1000, checkpointChars: 200, unfoldedChars: 5000 }),
+  ]
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRatio: 0 } })
+  const row = cost.turns[0]
+  // 本轮新增 800 字 + 本轮请求前写入的当前系统提示 6000 字（旧版 4000 字不上行）。
+  assert.equal(row.foldedTokens, estimateChars(800) + estimateChars(6000))
+})
+
+test('drift 给出会话历史估算与 provider 实测的对照', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 2, chars: 1000, checkpointChars: 200, unfoldedChars: 5000 }),
+  ]
+  const cost = buildCost({
+    groups,
+    folds: [],
+    config: { cacheHitRatio: 0.25 },
+    actual: { input: 120, cacheRead: 900, cacheWrite: 0, output: 40, turn: 1, step: 2 },
+  })
+  assert.ok(cost.drift)
+  assert.equal(cost.drift.estimateTokens, cost.totals.contextFoldedTokens)
+  assert.equal(cost.drift.actualPromptTokens, 1020)
+  assert.ok(cost.drift.ratio > 0)
+  assert.equal(cost.drift.overEstimate, cost.totals.contextFoldedTokens > 1020 * 1.3)
+})
+
 test('normalizeLatest 把 tracker 的最近一次回报换成展示口径', () => {
   assert.equal(normalizeLatest(null), null)
   assert.equal(normalizeLatest({ input: 0, cacheRead: 0 }), null)

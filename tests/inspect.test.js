@@ -289,6 +289,29 @@ test('writeReport 真的在 fold-debug 目录写出 HTML', () => {
   assert.equal(readFileSync(filePath, 'utf8'), html)
 })
 
+test('旧版系统提示只留作参考，从模型视角总量里扣掉', () => {
+  const messages = [
+    message('system', 'a'.repeat(1000), { seq: 1 }),
+    message('system', 'b'.repeat(2000), { seq: 2 }),
+    message('user', '开始', { source: { kind: 'user' } }),
+  ]
+  const model = buildReportModel({
+    sessionId: 'sess-sys',
+    derivedMessages: messages,
+    folds: new Map(),
+    pins: [],
+    recalls: [],
+    config: {},
+    now: 1,
+  })
+  assert.equal(model.staleSystem.count, 1)
+  assert.equal(model.staleSystem.chars, 1000)
+  // 2000 字的当前提示 + 2 字的用户原话；1000 字的旧版提示被扣掉。
+  assert.equal(model.folded.totals.chars, 2002)
+  assert.equal(model.unfolded.totals.chars, 2002)
+  assert.equal(model.folded.totals.chars + model.staleSystem.chars, 3002)
+})
+
 test('collectRecords 从 store 读出 fold / pin / recall', () => {
   const { folds } = fixture()
   const pins = [{ kind: 'pin', id: '结论', text: '正文', at: 20 }]

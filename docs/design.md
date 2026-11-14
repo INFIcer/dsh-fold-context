@@ -123,7 +123,10 @@ billion-context 在请求侧重写历史，不写 DSH 会话日志，也不读 `
 
 ### 实际请求为什么单独显示
 
-估算量的是会话历史，provider 回报的是真正上行的 token。billion-context 这类代理在请求期又压缩了一次，两边的差可能很大（本会话实测估算 344K、实际 107K）。把实际值并排显示，比调低估算系数诚实：估算不参与反事实推算，只当 ground truth。
+估算量的是会话历史，provider 回报的是真正上行的 token。billion-context 这类代理在请求期又压缩了一次，两边的差可能很大（本会话实测过估算 37 万、provider 回报 8 万）。把实际值并排显示，并给出 `cost.drift` 的比值，比调低估算系数诚实：估算不参与反事实推算，只当 ground truth。
+
+一开始这个差还有一半是我们的错：surface 里留着 6 份历史版本的系统提示词，统计时全算了进去，光这一项就多出十几万 token。宿主只把最后一条 `system` 当生效提示，于是 `excludeStaleSystem`（`lib/inspect.js`）把更早的版本从「模型视角」总量里扣掉，`lib/composition.js` 把它们标成 `reference` 只展示不计入，`lib/cost.js` 也只累加当前那条。另一半差额来自请求期压缩器，这部分不在本插件能看到的数据里。
+
 ### 客户端为什么手写
 
 DSH 的客户端插件产物就是 `window.__ModuleLoader__.load({ id, factory })` 包住的 CJS，`require("react")` 由宿主给。这个页面只有一个 Tab、一张图表和两张表，引入 tsdown/vite 构建链只会让「改一行要重新打包」成为障碍；手写 `client/client.js` 后，改完刷新页面就生效。
@@ -194,7 +197,7 @@ DSH 的客户端插件产物就是 `window.__ModuleLoader__.load({ id, factory }
 
 ## 上下文构成：折叠后与不折叠用同一把尺
 
-用户要的不是「总共省了多少」（账本页已经回答），而是「省掉的是哪一类」。`lib/composition.js` 把每个分组按消息类型拆成八类：系统提示、旧版系统提示、用户原话、思考与回复、工具调用与结果、上下文注入、折叠摘要、重要消息。系统提示只认最后一条非空 `system/message`（宿主 `token-meter` 的 `contextBreakdown` 也是这么切的）；更早的版本仍留在 surface 里、仍会发给模型，所以不丢弃，单列一类。
+用户要的不是「总共省了多少」（账本页已经回答），而是「省掉的是哪一类」。`lib/composition.js` 把每个分组按消息类型拆成八类：系统提示、旧版系统提示、用户原话、思考与回复、工具调用与结果、上下文注入、折叠摘要、重要消息。系统提示只认最后一条非空 `system/message`（宿主 `token-meter` 的 `contextBreakdown` 也是这么切的）。宿主换提示词时会在历史里 `append` 新的 `system/message`，但请求只把最后一条当生效提示，更早的版本留在 surface 里却不会上行——所以它们单列一类作参考，不计入合计与堆叠。
 
 同一套分类要在两种视角下都能算，所以折叠后视角里检查点自成一类（它确实是模型看到的一块），不折叠视角里则把检查点的 `foldRecord.items` 逐块展开回原本类别——靠折叠时留下的载荷，不重读会话。
 

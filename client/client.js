@@ -267,12 +267,13 @@ window.__ModuleLoader__.load({
         h(Kpi, { label: '净节省', value: (saved >= 0 ? '+' : '') + formatTokens(saved), color: saved >= 0 ? '#34d399' : '#f87171', hint: '省 ' + percent(totals.savedRate || 0) + '；缓存命中按 ' + Math.round((cost.hitRatio || 0) * 100) + '% 计价' }),
         h(Kpi, { label: '实际输入', value: latest ? formatTokens(latest.promptTokens) : '—', color: '#60a5fa', hint: latest ? '最近一次请求；有回报的 ' + (totals.actualTurns || 0) + ' 轮累计 ' + formatTokens(totals.actualPromptTokens || 0) : '本进程还没有拿到 provider 回报' })
       )
-      var gap = totals.coveredFoldedTokens > 0 ? totals.actualPromptTokens < totals.coveredFoldedTokens * 0.7 : false
-      var note = gap
-        ? '实际输入比估算低很多：说明还有请求期压缩在改写信史（例如 billion-context），估算量的是会话历史，不是真正上行的内容。'
-        : latest
-          ? '实际输入是 provider 回报的计费输入（含缓存命中），按轮累加；估算与它同向，但不会完全相等。'
-          : '实际输入要等本轮有一次模型调用后才会出现。'
+      var drift = cost.drift || null
+      var note = drift
+        ? '估算的会话历史约 ' + formatTokens(drift.estimateTokens) + ' token；provider 实测最近一次请求 ' + formatTokens(drift.actualPromptTokens) + ' token' +
+          (drift.overEstimate
+            ? '（估算更高：请求期压缩器（例如 billion-context）会把历史改写得更短，估算量的是会话历史，不是真正上行的内容；省下的相对比例仍然成立）。'
+            : '（两者同向）。')
+        : '实际输入要等本轮有一次模型调用后才会出现。'
       var body = rows.length === 0
         ? h('div', { style: C.notice }, '还没有可估算的轮次。')
         : h('div', { style: { maxHeight: '280px', overflowY: 'auto' } },
@@ -282,7 +283,7 @@ window.__ModuleLoader__.load({
               }))),
               h('tbody', {}, rows.map(function (row) {
                 var rowSaved = row.netSavedTokens || 0
-                return h('tr', { key: 'c' + row.turn + '-' + (row.steps || 1) },
+                return h('tr', { key: 'c' + row.turn },
                   h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.turn === null ? '?' : row.turn)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.steps || 1)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, formatTokens(row.foldedTokens)),
@@ -630,7 +631,9 @@ window.__ModuleLoader__.load({
     // token 口径与宿主 token-meter 的基本档一致：4 字符 ≈ 1 token。
     // 两种视角：折叠后 = 模型现在看到的；不折叠 = 假设一次都没折过。
 
-    var COMPOSITION_KEYS = ['system', 'systemHistory', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
+    // 旧版系统提示是会话历史里的副本，真正上行的只有最后一条：不参与堆叠与合计，
+    // 只在图例里留个数字当参考，否则构成图会被抬高好几倍。
+    var COMPOSITION_KEYS = ['system', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
 
     var COMPOSITION_COLORS = {
       system: '#8b949e',
@@ -833,6 +836,7 @@ window.__ModuleLoader__.load({
         var ratio = scale > 0 ? Math.max(0, Math.min(1, (total || 0) / scale)) : 0
         var fill = h('div', { style: Object.assign({}, C.compFill, { width: (100 * ratio) + '%' }) },
           categories.map(function (category) {
+            if (category.reference === true) return null
             var value = bucket[category.key] || 0
             if (!(value > 0)) return null
             return h('div', {
@@ -896,7 +900,7 @@ window.__ModuleLoader__.load({
               h('div', { style: C.sectionTitle }, '上下文构成'),
               h('div', { style: C.sub }, '折叠后 ' + formatTokens(tokensOf(foldedTotal)) + ' token · 不折叠 ' + formatTokens(tokensOf(unfoldedTotal)) + ' · 省 ' + percent(saveRate))
             ),
-            h('div', { style: C.sub }, '按用途分类；两条同比例尺，长度差就是省下的量（图例：折叠后 / 不折叠）。系统提示只算当前生效的那一版，旧版单列。')
+            h('div', { style: C.sub }, '按用途分类；两条同比例尺，长度差就是省下的量（图例：折叠后 / 不折叠）。系统提示只算当前生效的那一版；旧版提示词单列在图例里，不计入合计。')
           ),
           barLine('折叠后', folded, foldedTotal, barScale, 0),
           barLine('不折叠', unfolded, unfoldedTotal, barScale, unfoldedTotal > 0 ? foldedTotal / unfoldedTotal : 0),
@@ -1027,11 +1031,15 @@ window.__ModuleLoader__.load({
       if (data.empty) return h('div', {}, toolbar, h('div', { style: C.notice }, '这个会话还没有派生消息（历史为空）。'))
       var totals = data.totals || {}
       var tokens = typeof totals.tokens === 'number' ? totals.tokens : 0
+      var stale = totals.staleSystem || null
+      var staleText = stale && stale.count > 0
+        ? '；另有 ' + stale.count + ' 条旧版系统提示（' + formatChars(stale.chars) + '）留在会话历史里但不会上行，已从合计里扣掉'
+        : ''
       var notice = h('div', { style: C.notice },
-        '模型看到 ' + (totals.messages || 0) + ' 条消息、' + formatChars(totals.chars) + '，约 ' +
+        '折叠后的会话历史 ' + (totals.messages || 0) + ' 条消息、' + formatChars(totals.chars) + '，约 ' +
         formatTokens(tokens) + ' token（4 字符/token，按块 +4）；折叠检查点 ' + (totals.checkpoints || 0) +
         ' 条、重要消息 ' + (totals.pins || 0) + ' 条；相比不折叠省 ' + formatChars(totals.savedChars) +
-        '（' + percent(totals.saveRate) + '）。'
+        '（' + percent(totals.saveRate) + '）' + staleText + '。'
       )
       var actual = data.actual || null
       var gap = actual ? tokens > actual.promptTokens * 1.3 : false

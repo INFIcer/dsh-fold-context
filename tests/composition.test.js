@@ -90,7 +90,7 @@ test('逐块累计对齐总量，且每块带轮次标签', () => {
   assert.deepEqual(result.points[2].cumulative.folded, result.totals.folded)
 })
 
-test('系统提示只算最后一条非空的 system，旧版单列 systemHistory', () => {
+test('系统提示只算最后一条非空的 system，旧版单列且不计入合计', () => {
   const system = (chars) => entry({
     role: 'system',
     sourceKind: 'system',
@@ -108,9 +108,13 @@ test('系统提示只算最后一条非空的 system，旧版单列 systemHistor
   assert.equal(result.totals.folded.systemHistory, 60)
   assert.equal(result.totals.unfolded.system, 70)
   assert.equal(result.totals.unfolded.systemHistory, 60)
-  assert.equal(result.totals.sum.folded, 130)
+  // 旧版提示词只留在会话历史里、不会上行，所以不计入合计。
+  assert.equal(result.totals.sum.folded, 70)
+  assert.equal(result.totals.sum.unfolded, 70)
   assert.equal(result.points[1].cumulative.folded.system, 70)
   assert.equal(result.points[1].cumulative.folded.systemHistory, 60)
+  const reference = result.categories.filter((item) => item.reference === true)
+  assert.deepEqual(reference.map((item) => item.key), ['systemHistory'])
 })
 
 test('没有分组时给出完整分类与空总量', () => {
