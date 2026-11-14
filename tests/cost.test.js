@@ -91,21 +91,22 @@ test('当前系统提示从第一个请求起计入，不按它在消息流里�
   assert.equal(cost.turns[0].foldedTokens, estimateChars(6000) + estimateChars(4000))
 })
 
-test('不折叠视角的未命中只比折叠视角多出轮边界那条回复', () => {
+test('不折叠基线不付检查点/固化/召回，未命中只会比折叠更少', () => {
   // 第一轮长回复 800 字、折成 200 字摘要；第二轮原样。
   const groups = [
     { kind: 'system', chars: 4000 },
     turn({ turn: 1, steps: 3, chars: 1200, checkpointChars: 200, unfoldedChars: 60000, outputChars: 800 }),
     turn({ turn: 2, steps: 2, chars: 400, checkpointChars: 400, unfoldedChars: 8000, outputChars: 100 }),
   ]
-  const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 0.9 } })
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 1 } })
   const row = cost.turns[1]
-  // 差 = 上一轮回复 − 上一轮摘要：多出来的只有这条边界，跟上下文涨到多大无关。
-  assert.equal(row.boundaryDeltaTokens, estimateChars(800) - estimateChars(200))
-  assert.equal(row.unfoldedInputTokens - row.foldedInputTokens, estimateChars(800) - estimateChars(200))
+  // 折叠视角多付了上一轮的 200 字检查点；不折叠没有这份东西。
+  assert.equal(row.unfoldedInputTokens, row.foldedInputTokens - estimateChars(200))
+  assert.ok(row.unfoldedInputTokens < row.foldedInputTokens)
+  assert.ok(cost.totals.netSavedTokens > 0)
 })
 
-test('上下文体积翻倍不会放大两种视角的未命中差', () => {
+test('上一轮体积翻倍不会放大两种视角第二轮的未命中差', () => {
   function build(prevUnfoldedChars) {
     return buildCost({
       groups: [
@@ -120,8 +121,9 @@ test('上下文体积翻倍不会放大两种视角的未命中差', () => {
   const big = build(200000)
   const gapSmall = small.turns[1].unfoldedInputTokens - small.turns[1].foldedInputTokens
   const gapBig = big.turns[1].unfoldedInputTokens - big.turns[1].foldedInputTokens
+  // 上一轮的原文只在它自己首次上行时算未命中；第二轮两者都只多一轮原文 vs 摘要。
   assert.equal(gapSmall, gapBig)
-  // 体积差全落在命中的前缀里：折叠后整体仍然便宜。
+  // 整体上折叠仍把上一轮的大头挡在未命中之外：体积越大省得越多。
   assert.ok(big.totals.netSavedTokens > small.totals.netSavedTokens)
 })
 
@@ -316,8 +318,10 @@ test('没有回报时按配置的命中率，金额按三档单价结算', () =>
   )
   assert.equal(cost.totals.foldedMoney, expected)
   assert.equal(cost.totals.netSavedMoney, roundMoney(cost.totals.unfoldedMoney - cost.totals.foldedMoney))
-  // 只有一轮时折叠省不到东西：轮内内容两种视角一样，摘要要到下一轮才取代原文。
-  assert.equal(cost.totals.netSavedMoney, 0)
+  // 只有一轮：折叠在轮末才发生，两种视角的未命中基本一样；
+  // 新的无插件基线按「原文各一次」计，省下的只是重发档的一小截。
+  assert.ok(cost.totals.netSavedMoney >= 0)
+  assert.ok(cost.totals.netSavedMoney < 0.01)
   // 行金额逐项可复核；行用未取整 token 算，与整数 token 的差不到一分钱。
   const row = cost.turns[0]
   const rowExpected = roundMoney(

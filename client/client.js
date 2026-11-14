@@ -366,15 +366,15 @@ window.__ModuleLoader__.load({
       return text
     }
 
-    // 未命中口径：不按重发量等比例放大，只补轮边界上那条回复。
-    // 页面要写出来，否则「折叠后未命中比不折叠少」看着像偷了数。
+    // 未命中口径：两种视角都要为原文付一次首次上行；折叠视角还要多付
+    // 检查点、固化消息、召回返回的正文——所以不折叠的未命中总是更小一截。
+    // 折叠真正省的是命中档：前缀体积小 5 倍，重复部分才便宜。
     function missNote(totals) {
-      var boundary = totals && typeof totals.unfoldedBoundaryTokens === 'number' ? totals.unfoldedBoundaryTokens : 0
-      var text = '未命中按「每步新追加的思考/回复/工具结果」计，两种视角共用同一份，不随上下文体积放大'
-      if (boundary > 0) {
-        text += '；不折叠只多出每轮边界上那条回复，累计 ' + formatTokens(boundary) + ' token'
-      }
-      return text + '。'
+      var folded = totals && typeof totals.foldedInputTokens === 'number' ? totals.foldedInputTokens : 0
+      var plain = totals && typeof totals.unfoldedInputTokens === 'number' ? totals.unfoldedInputTokens : 0
+      var diff = Math.max(0, folded - plain)
+      return '未命中 = 内容首次上行的那一次。原文两种视角都要付一次；折叠多出检查点、固化消息、召回正文，'
+        + '累计 ' + formatTokens(diff) + ' token。折叠省的是命中档：前缀体积小，重复重发的部分按缓存价便宜一半多。'
     }
 
     // 折叠视角的重放量应该≈ provider 实测（同一份历史在每一步被重发），对不上就直接写差多少。

@@ -1,6 +1,6 @@
 {
   "name": "dsh-fold-context",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "按轮折叠上下文：每轮结束把长思考、工具输出与回复折成一条带编号的检查点，原文可召回，重要消息永不折叠。",
   "license": "MIT",
   "private": true,
