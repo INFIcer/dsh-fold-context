@@ -46,13 +46,39 @@ test('statsOf 只统计思考、回复与工具输出', () => {
   assert.equal(totalChars(stats), 22)
 })
 
-test('buildNote 带上编号与召回入口，且不超过上限', () => {
+test('buildNote 带上编号与召回入口，短回复整段保留', () => {
   const stats = statsOf([assistantNode(2, { reasoning: 'x'.repeat(300), text: 'y'.repeat(80) })])
   const note = buildNote({ foldId: 'f7', turn: 7, stats, maxChars: 200, toolName: 'fold_recall' })
   assert.ok(note.startsWith('【已折叠历史】'))
   assert.ok(note.includes('f7'))
   assert.ok(note.includes('fold_recall'))
-  assert.ok(note.length <= 200)
+  // 回复 80 字、上限 200：整段原样保留一次，不拆成开头+结尾。
+  assert.ok(note.includes('y'.repeat(80)), note)
+  assert.ok(!note.includes('结尾'), note)
+})
+
+test('回复超过上限才拆成开头+结尾，且预览合计不超上限', () => {
+  const stats = statsOf([assistantNode(2, { reasoning: 'x'.repeat(300), text: 'y'.repeat(400) })])
+  const note = buildNote({ foldId: 'f8', turn: 8, stats, maxChars: 200, toolName: 'fold_recall' })
+  const match = note.match(/开头「([^」]*)…」，结尾「…([^」]*)」/)
+  assert.ok(match, note)
+  assert.ok(match[1].length + match[2].length <= 200, note)
+  assert.ok(match[1].length > match[2].length, '开头分到约 3/4 的篇幅')
+})
+
+test('maxNoteChars 调大后预览随之变长，且不重复展示', () => {
+  const stats = statsOf([assistantNode(2, { reasoning: 'x'.repeat(300), text: 'y'.repeat(500) })])
+  const small = buildNote({ foldId: 'f9', turn: 9, stats, maxChars: 80, toolName: 'fold_recall' })
+  const large = buildNote({ foldId: 'f9', turn: 9, stats, maxChars: 600, toolName: 'fold_recall' })
+  const preview = (note) => {
+    const m = note.match(/· 回复约 500 字：([\s\S]*)$/)
+    if (m) return m[1]
+    const mm = note.match(/开头「([^」]*)…」，结尾「…([^」]*)」/)
+    return mm ? mm[1] + mm[2] : ''
+  }
+  assert.ok(preview(small).length <= 80, small)
+  // 600 上限大于回复本身：整段原样保留。
+  assert.equal(preview(large), 'y'.repeat(500))
 })
 
 test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
@@ -408,8 +434,10 @@ test('buildNote 的长度上限只约束回复行，元信息不被截断', () =
   const long = buildNote({ foldId: 'f3', turn: 3, stats, maxChars: 120, toolName: 'fold_recall' })
   assert.ok(long.includes('【已折叠历史】 第 3 轮'), long)
   assert.ok(long.includes('· 文件：读过 lib/web.js'), long)
-  assert.ok(long.includes('· 回复约 4000 字'), '回复行保留到上限')
-  assert.ok(long.length <= Math.max(long.indexOf('\n· 回复约') + 1, 0) + 120, long)
+  const match = long.match(/· 回复约 4000 字，开头「([^」]*)…」，结尾「…([^」]*)」/)
+  assert.ok(match, long)
+  // 预览文字本身不超过上限；元信息（编号/文件行）在它之外，不被挤掉。
+  assert.ok(match[1].length + match[2].length <= 120, long)
   const short = buildNote({ foldId: 'f4', turn: 4, stats: { ...stats, replyChars: 0 }, maxChars: 80, toolName: 'fold_recall' })
   assert.ok(short.includes('· 文件：读过 lib/web.js'), short)
 })
@@ -655,6 +683,9 @@ test('buildNote 带上文件行，且在预算内优先保住它', () => {
   ])
   const note = buildNote({ foldId: 'f9', turn: 9, stats, maxChars: 600, toolName: 'fold_recall' })
   assert.ok(note.includes('· 文件：读过 lib/web.js'), note)
+  // 回复 400 字没超过 600 上限：整段保留，不重复展示。
+  assert.ok(note.includes('y'.repeat(400)), note)
+  assert.ok(!note.includes('结尾'), note)
 })
 
 function foldRecord(id, turn, items) {
