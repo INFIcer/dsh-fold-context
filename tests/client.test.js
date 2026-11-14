@@ -288,6 +288,13 @@ test('账本头部只用 token 报收益，不出现人民币', () => {
   assert.equal(kpis.some(function (item) { return String(item.value).includes('¥') || String(item.hint).includes('¥') }), false)
   assert.ok(kpis[0].hint.includes('32 段折叠'))
   assert.ok(kpis[1].hint.includes('5 次召回'))
+  // 目录/检索不算召回次数（和 store.recallCount 一致），但要让人看见它们也花了 token。
+  const withProbes = module.__test.ledgerKpis({
+    savedTokens: 100, savedChars: 400, saveRate: 0.5, folds: 1,
+    recalls: 5, probes: 3, recallTokens: 4600, recalledFolds: 3,
+    pins: 0, pinChars: 0, pinTokens: 0, netTokens: 90,
+  }, { tokens: 0 })
+  assert.ok(withProbes[1].hint.includes('5 次召回 + 3 次目录/检索'), withProbes[1].hint)
 })
 
 // 收益与成本都不该再拿单价折成人民币：真实请求会被缓存、压缩器和工具定义改写。
@@ -323,6 +330,14 @@ test('账单页写明命中率与校准来源', () => {
   assert.ok(note.includes('按 6 轮回报反推校准'), note)
   assert.ok(note.includes('提示词 ×0.48'), note)
   assert.ok(note.includes('输出 ×1.92'), note)
+  // 结算用的是扣掉每步新增内容后的命中率；它和展示值差得多时要写出来，别让人拿展示值反算金额。
+  const settled = module.__test.calibrationNote({
+    hitRate: 0.983,
+    resendHitRate: 0.999,
+    measuredHitRate: 0.983,
+    calibration: { coveredTurns: 1, promptScale: 1, outputScale: 1 },
+  })
+  assert.ok(settled.includes('扣掉每步新增内容后'), settled)
   const cold = module.__test.calibrationNote({})
   assert.ok(cold.includes('（默认值）'), cold)
   assert.ok(cold.includes('按 1 计'), cold)

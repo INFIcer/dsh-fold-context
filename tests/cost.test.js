@@ -55,10 +55,12 @@ test('命中率为 0 时折叠视角的前缀全部按未命中计价', () => {
   // 本轮请求里的内容 = 1200 - 200 = 1000 字；系统提示 4000 字是上一轮之后写入的，也算未命中。
   const added = estimateChars(1000)
   const fresh = estimateChars(4000)
-  const resend = resendOf(3, 0, 1000)
+  // 本轮的重发只有上一轮的检查点（这里就是系统提示）：3 步里发 3 次，
+  // 首次按未命中、其后 2 次进拆档部分；命中率为 0 时它们同样按未命中计价。
+  const resend = 2 * fresh
   assert.equal(row.foldedHitTokens, 0)
   assert.equal(row.foldedInputTokens, resend + added + fresh)
-  assert.equal(row.foldedTokens, 2 * added + fresh)
+  assert.equal(row.foldedTokens, 2 * fresh + added + fresh)
   // 不折叠视角的整体体积照旧：系统提示 4000 字每步一次，原文 60000 字平均半步。
   assert.equal(row.unfoldedTokens, resendOf(3, 4000, 60000) + estimateChars(60000))
   // 未命中不按体积再折一遍：两种视角每步的新增内容一样，没上一轮就没有轮边界差。
@@ -121,7 +123,50 @@ test('没折叠的短回合整段仍算新内容，不进命中前缀', () => {
   ]
   const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 0 } })
   const row = cost.turns[1]
-  assert.equal(row.foldedTokens, 2 * estimateChars(4000) + estimateChars(900))
+  // 本轮两步都要重发上一轮那 900 字：首请求未命中，第二次在命中率为 0 时仍按未命中计。
+  assert.equal(row.foldedTokens, 2 * estimateChars(4000) + 2 * estimateChars(900))
+})
+
+test('上一轮检查点的后续重发也计入折叠视角', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 1, chars: 400, checkpointChars: 400, unfoldedChars: 4000 }),
+    turn({ turn: 2, steps: 3, chars: 300, checkpointChars: 300, unfoldedChars: 3000 }),
+  ]
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 1 } })
+  const row = cost.turns[1]
+  // 第 1 轮的检查点在第二轮的 3 步里都在：首次未命中 + 2 次按命中价重发。
+  assert.equal(row.freshTokens, estimateChars(400))
+  assert.equal(row.foldedHitTokens, 3 * estimateChars(4000) + 2 * estimateChars(400))
+  assert.equal(row.foldedInputTokens, estimateChars(400))
+})
+
+test('旧记录缺 unfoldedChars 时反事实不塌成 0', () => {
+  const groups = [
+    turn({ turn: 1, folded: true, chars: 300, checkpointChars: 300, unfoldedChars: 0 }),
+    turn({ turn: 2, folded: true, chars: 400, checkpointChars: 400, unfoldedChars: 0 }),
+  ]
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 1 } })
+  assert.equal(cost.totals.unfoldedEstimatedTurns, 2)
+  assert.equal(cost.turns[0].unfoldedChars, 300)
+  assert.ok(cost.totals.contextUnfoldedTokens > 0)
+  assert.ok(Number.isFinite(cost.totals.netSavedTokens))
+})
+
+test('重发命中率会扣掉每步新增内容', () => {
+  const groups = [
+    { kind: 'system', chars: 40000 },
+    turn({ turn: 1, steps: 2, chars: 12000, checkpointChars: 2000, unfoldedChars: 600000 }),
+    turn({ turn: 2, steps: 3, chars: 800, checkpointChars: 800, unfoldedChars: 8000 }),
+  ]
+  const folds = [
+    { id: 'f2', turn: 2, usage: { steps: 3, input: 1000, cacheRead: 29000, cacheWrite: 0, output: 100 } },
+  ]
+  const cost = buildCost({ groups, folds, config: {} })
+  // 展示口径是 provider 原样回报；结算用的命中率扣掉了每步新写进历史的内容，所以更高。
+  assert.ok(Math.abs(cost.hitRate - 29000 / 30000) < 1e-9)
+  assert.ok(cost.resendHitRate > cost.hitRate)
+  assert.ok(cost.resendHitRate <= 1)
 })
 
 test('用量的 steps 为 0 时退回 1 步，不出现除零', () => {

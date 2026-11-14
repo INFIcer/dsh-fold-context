@@ -26,7 +26,7 @@
     "test": "node --test",
     "eval": "node tools/eval.mjs",
     "repair:payloads": "node tools/repair-payloads.mjs",
-    "check": "node --check lib/host.js && node --check lib/config.js && node --check lib/store.js && node --check lib/fold-text.js && node --check lib/plan.js && node --check lib/commit.js && node --check lib/tools.js && node --check lib/prompt.js && node --check lib/template.js && node --check lib/constants.js && node --check lib/inspect.js && node --check lib/logger.js && node --check lib/tokens.js && node --check lib/stats.js && node --check lib/eval.js && node --check lib/web.js && node --check client/client.js"
+    "check": "node --check client/client.js && node --check lib/commit.js && node --check lib/composition.js && node --check lib/config.js && node --check lib/constants.js && node --check lib/cost.js && node --check lib/diff.js && node --check lib/eval.js && node --check lib/fold-text.js && node --check lib/host.js && node --check lib/inspect.js && node --check lib/logger.js && node --check lib/plan.js && node --check lib/pricing.js && node --check lib/prompt.js && node --check lib/recall.js && node --check lib/stats.js && node --check lib/store.js && node --check lib/template.js && node --check lib/tokens.js && node --check lib/tools.js && node --check lib/turn-tracker.js && node --check lib/turns.js && node --check lib/usage.js && node --check lib/web.js && node --check tools/eval.mjs && node --check tools/repair-payloads.mjs && node --check tools/render-report.mjs && node --check tools/session-log.mjs"
   },
   "dsh": {
     "bundle": {

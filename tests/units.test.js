@@ -19,7 +19,7 @@ import {
   validateConfigPatch,
 } from '../lib/config.js'
 import { promptSection, systemPromptText } from '../lib/prompt.js'
-import { blendedInputPrice, moneyOf, pricesOf, roundMoney, yuanOf } from '../lib/pricing.js'
+import { moneyOf, pricesOf, roundMoney, yuanOf } from '../lib/pricing.js'
 import {
   matchFoldPartNumbers,
   normalizeQuery,
@@ -368,12 +368,10 @@ test('pricing 用默认价兜底，金额按百万 token 折算', () => {
     output: 4,
     total: 5.02,
   })
-  // 加权输入均价：命中占比越高越便宜；默认命中率 0.97 时几乎等于命中价。
-  assert.equal(blendedInputPrice(prices, 0), 1)
-  assert.equal(blendedInputPrice(prices, 1), 0.02)
-  assert.equal(blendedInputPrice(prices, 0.5), 0.51)
-  assert.equal(blendedInputPrice(prices), 0.0494)
-  assert.equal(blendedInputPrice(prices, 0.97), roundMoney(0.02 * 0.97 + 1 * 0.03))
+  // 三档单价各乘各的，不再提供「命中率加权均价」：折叠省下的是重发的旧历史（命中价），
+  // 召回与摘要的首次上行是新内容（未命中价），一个均价会同时高估一方、低估另一方。
+  assert.equal(yuanOf(1000000, prices.cacheHit), 0.02)
+  assert.equal(yuanOf(1000000, prices.input), 1)
 })
 
 test('normalizeConfig 忽略未知键并回调 warn', () => {

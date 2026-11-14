@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { buildStats, foldCost } from '../lib/stats.js'
 import { estimateTokens } from '../lib/tokens.js'
 import { pinPrefix } from '../lib/constants.js'
+import { roundMoney } from '../lib/pricing.js'
 
 function fold(id, turn, text, note, extra) {
   return Object.assign({
@@ -97,4 +98,69 @@ test('没有记录时给空账本而不是报错', () => {
   // 空账本也要给出单价，页面不必自己兜底。
   assert.equal(stats.pricing.prices.input, 1)
   assert.equal(stats.pricing.cacheHitRate, 0.97)
+})
+
+// 金额曾经用「命中率加权均价」把两种方向相反的量压成一个价，下面几条把它钉住。
+test('金额分档：折叠按命中价乘重发次数，摘要首次上行按未命中价', () => {
+  const f1 = fold('f1', 1, 'a'.repeat(4000), 'b'.repeat(200), { usage: { steps: 2 } })
+  const f2 = fold('f2', 2, 'x'.repeat(400), 'y'.repeat(40), { usage: { steps: 3 } })
+  const stats = buildStats({ records: [f1, f2], config: {}, now: 1 })
+  const c1 = foldCost(f1)
+  // 第 1 轮折叠后，第 2 轮的 3 步都要重发它，按缓存命中价 0.02 计。
+  assert.equal(stats.rows[0].requests, 3)
+  assert.equal(stats.rows[1].requests, 0)
+  assert.equal(stats.totals.savedMoney, roundMoney((c1.savedTokens * 3 * 0.02) / 1e6))
+  // 摘要是新内容：第 2 轮首请求按未命中价 1 付一次；之后没有请求就不再收。
+  assert.equal(stats.totals.checkpointMoney, roundMoney((c1.noteTokens * 1) / 1e6))
+  assert.equal(stats.totals.netMoney, roundMoney(stats.totals.savedMoney - stats.totals.checkpointMoney))
+  assert.equal(stats.pricing.steps.lastTurn, 2)
+  assert.equal(stats.pricing.steps.knownTurns, 2)
+})
+
+test('目录与检索照算成本，但不算内容召回', () => {
+  const records = [
+    fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40)),
+    { kind: 'recall', id: 'f1', turn: 1, at: 10, chars: 30, tokens: 10, mode: 'index' },
+    { kind: 'recall', id: 'f1', turn: 1, at: 11, chars: 40, tokens: 12, mode: 'parts' },
+  ]
+  const stats = buildStats({ records, config: {} })
+  // 和 store.recallCount 一致：只有真的把原文读回来的那次才算召回次数。
+  assert.equal(stats.rows[0].recallCount, 1)
+  assert.equal(stats.rows[0].probeCount, 1)
+  assert.equal(stats.totals.recalls, 1)
+  assert.equal(stats.totals.probes, 1)
+  // 但两者都占 token，成本照算。
+  assert.equal(stats.totals.recallTokens, 22)
+  assert.ok(stats.totals.recallMoney > 0)
+})
+
+test('重要消息 = 首次未命中 + 之后每步按命中价常驻', () => {
+  const pinText = 'c'.repeat(100)
+  const records = [
+    fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40), { usage: { steps: 2 } }),
+    { kind: 'pin', id: 'P', turn: 1, at: 2001, text: pinText },
+  ]
+  const stats = buildStats({ records, config: {} })
+  const row = stats.pins[0]
+  // 字数与 token 用同一个字符串算：chars 以前漏了前缀与标题，和 tokens 对不上。
+  const full = pinPrefix + ' P\n' + pinText
+  const tokens = estimateTokens([full])
+  assert.equal(row.chars, full.length)
+  assert.equal(row.tokens, tokens)
+  // 第 1 轮 2 步：重要消息写在轮内，之后还有半步（(2-1)/2）会重发它；轮后没有请求。
+  assert.equal(row.requests, 0.5)
+  assert.equal(row.pinMoney, roundMoney((tokens * 1 + tokens * 0.5 * 0.02) / 1e6))
+})
+
+test('没有 provider 回报时按平均步数补，并标记估算', () => {
+  const records = [
+    fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40)),
+    fold('f2', 2, 'x'.repeat(200), 'y'.repeat(20)),
+  ]
+  const stats = buildStats({ records, config: {} })
+  assert.equal(stats.pricing.steps.estimated, true)
+  assert.equal(stats.pricing.steps.averageSteps, 1)
+  // 第 2 轮按平均 1 步补，所以第 1 轮的省下只乘 1 次。
+  assert.equal(stats.rows[0].requests, 1)
+  assert.equal(stats.rows[0].moneyEstimated, true)
 })

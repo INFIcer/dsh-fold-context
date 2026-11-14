@@ -238,7 +238,7 @@ window.__ModuleLoader__.load({
           label: '召回成本',
           value: (recall > 0 ? '−' : '') + formatTokens(recall) + ' token',
           color: recall > 0 ? '#f87171' : 'inherit',
-          hint: totals.recalls + ' 次召回，' + totals.recalledFolds + ' 段被回看过',
+          hint: totals.recalls + ' 次召回' + (totals.probes > 0 ? ' + ' + totals.probes + ' 次目录/检索' : '') + '，' + totals.recalledFolds + ' 段被回看过',
         },
         {
           label: '重要消息成本',
@@ -348,7 +348,12 @@ window.__ModuleLoader__.load({
       var cal = (cost && cost.calibration) || null
       var measured = cost && typeof cost.measuredHitRate === 'number'
       var rate = cost && typeof cost.hitRate === 'number' ? cost.hitRate : 0.97
+      var resend = cost && typeof cost.resendHitRate === 'number' ? cost.resendHitRate : null
       var text = '命中率 ' + percent(rate) + (measured ? '（provider 实测）' : '（默认值）')
+      // 结算用的不是这个展示值：每步新写进历史的内容按定义必定未命中，留在分母里会压低命中率。
+      if (resend !== null && resend > rate + 0.0005) {
+        text += '，扣掉每步新增内容后 ' + percent(resend) + '（结算按这个）'
+      }
       if (!cal || !cal.coveredTurns) {
         return text + '；还没有 provider 回报，校准系数按 1 计，估算可能偏高'
       }
