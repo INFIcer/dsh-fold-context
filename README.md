@@ -171,6 +171,20 @@ billion-context（本地代理式压缩）与本插件在不同层工作：前�
 - 关键词检索只搜 `fold-store` 里的折叠原文：重要消息与用户原话本来就在上下文里，不参与检索；分叉会话同样搜不到父会话的载荷。检索只定位，不判断内容是否已过时——文件改过没有，看摘要里的「· 文件：改过 …」。
 - 官方压缩把 `fold_pin` 卷进摘要后，插件不再跟踪它：账本仍按它在上下文里计常驻开销，模型也取不回那条 pin。没装请求期代理又开回了默认压缩时，这个偏差才会出现。
 
+## 评测
+
+完整方法见 [docs/evaluation.md](docs/evaluation.md)。一句话：**经济性可以对账，质量只能同任务开关对照。**
+
+离线评测器只读会话日志里 provider 回报的用量与 `fold-store` 的记录，不读账本的反事实估算，所以算出来的金额能直接和账单比：
+
+```
+node tools/eval.mjs --list
+node tools/eval.mjs <会话 id> [--home <DSH_HOME>] [--json]
+node tools/eval.mjs --ab <开了折叠的会话> <对照会话>
+```
+
+输出每轮的实测 prompt / 未命中 / 输出 / 金额，以及折叠段数、召回次数与模式、重复召回、跨轮重复调用这些质量线索。
+
 ## 测试
 
 ```
@@ -186,6 +200,7 @@ node tests/cost.test.js
 node tests/composition.test.js
 node tests/diff.test.js
 node tests/client.test.js
+node tests/eval.test.js
 ```
 
 沙箱里 `node --test` 可能因 spawn 权限失败，直接按文件跑即可。
