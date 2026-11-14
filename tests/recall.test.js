@@ -149,3 +149,13 @@ test('renderFoldParts 对单个超大段也截断到上限内', () => {
 test('normalizePartSelectors 接受数字段号', () => {
   assert.deepEqual(normalizePartSelectors([1, '3-5']), ['1', '3-5'])
 })
+
+test('回复完整写入检查点时，召回不再返回回复段', () => {
+  const kept = record({ replyTruncated: false })
+  assert.deepEqual(foldParts(kept).map((part) => part.kind), ['think', 'call', 'result'])
+  assert.ok(!describeFold(kept).includes('[回复]'), describeFold(kept))
+  // 回复被截断（或没有标记的旧记录）时仍能召回全文。
+  assert.deepEqual(foldParts(record({ replyTruncated: true })).map((part) => part.kind), ['think', 'reply', 'call', 'result'])
+  assert.ok(describeFold(record({ replyTruncated: true })).includes('[回复] 开始搬'))
+  assert.deepEqual(foldParts(record()).map((part) => part.kind), ['think', 'reply', 'call', 'result'])
+})

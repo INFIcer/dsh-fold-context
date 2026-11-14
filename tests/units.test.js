@@ -71,14 +71,15 @@ test('maxNoteTokens 调大后预览随之变长，且不重复展示', () => {
   const small = buildNote({ foldId: 'f9', turn: 9, stats, maxTokens: 20, toolName: 'fold_recall' })
   const large = buildNote({ foldId: 'f9', turn: 9, stats, maxTokens: 150, toolName: 'fold_recall' })
   const preview = (note) => {
-    const m = note.match(/· 回复约 500 字(?:（≈\d+ token）)?：([\s\S]*)$/)
+    const m = note.match(/· 回复(?:约 500 字(?:（≈\d+ token）)?)?：([\s\S]*)$/)
     if (m) return m[1]
     const mm = note.match(/开头「([^」]*)…」，结尾「…([^」]*)」/)
     return mm ? mm[1] + mm[2] : ''
   }
   assert.ok(preview(small).length <= 80, small)
-  // 600 上限大于回复本身：整段原样保留。
+  // 600 上限大于回复本身：整段原样保留，且不再标字数（标了像被截断过）。
   assert.equal(preview(large), 'y'.repeat(500))
+  assert.ok(!large.includes('回复约'), large)
 })
 
 test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
