@@ -30,16 +30,16 @@ function assistantEntry(text) {
   return entry({ role: 'assistant', sourceKind: 'model', text, chars: text.length, blocks, foldRecord: undefined })
 }
 
-function checkpointEntry({ foldId, noteChars, items }) {
+function checkpointEntry({ foldId, noteChars, items, text, turn }) {
   return entry({
     role: 'user',
     sourceKind: 'fold-checkpoint',
     isCheckpoint: true,
     foldId,
     chars: noteChars,
-    text: '【已折叠历史】' + foldId,
+    text: text || '【已折叠历史】' + foldId,
     blocks: [],
-    foldRecord: { id: foldId, turn: 9, chars: noteChars, items },
+    foldRecord: { id: foldId, turn: typeof turn === 'number' ? turn : null, chars: noteChars, items },
   })
 }
 
@@ -127,6 +127,24 @@ test('轮结束后落地的折叠检查点归上一轮，不另开一轮', () =>
   assert.equal(turnGroups[1].turn, 2)
 })
 
+test('折叠轮没留回复原文时，把摘要里的回复开头当预览', () => {
+  const groups = buildTurnGroups({
+    entries: [
+      userEntry('第一句'),
+      checkpointEntry({
+        foldId: 'f1',
+        noteChars: 60,
+        text: '【已折叠历史】第 1 轮已折叠\n· 思考 2 段，约 300 字\n· 回复约 120 字，开头「安装已生效，接着验证」，结尾「…再补一句」',
+        items: [{ seq: 3, chars: 200, blocks: [{ kind: 'think', name: '', text: '想' }] }],
+      }),
+    ],
+    minFoldChars: 10,
+  })
+  const turnGroups = groups.filter((group) => group.kind === 'turn')
+  assert.equal(turnGroups[0].replyText, '')
+  assert.equal(turnGroups[0].replyNote, '安装已生效，接着验证')
+})
+
 test('轮次按用户消息顺序编号；第一个折叠轮之前标插件生效前', () => {
   const big = 'x'.repeat(2000)
   const groups = buildTurnGroups({
@@ -143,6 +161,28 @@ test('轮次按用户消息顺序编号；第一个折叠轮之前标插件生�
   assert.equal(turnGroups[0].prePlugin, true)
   assert.equal(turnGroups[1].turn, 2)
   assert.equal(turnGroups[1].prePlugin, false)
+})
+
+test('轮次以折叠记录里的 turn 为准，前后按相邻轮次推断', () => {
+  const groups = buildTurnGroups({
+    entries: [
+      userEntry('第一句'),
+      assistantEntry('答'),
+      userEntry('第二句'),
+      checkpointEntry({
+        foldId: 'f3',
+        noteChars: 30,
+        turn: 3,
+        items: [{ seq: 5, chars: 400, blocks: [{ kind: 'reply', name: '', text: '答'.repeat(50) }] }],
+      }),
+      userEntry('第四句'),
+    ],
+    minFoldChars: 10,
+  })
+  const turnGroups = groups.filter((group) => group.kind === 'turn')
+  assert.deepEqual(turnGroups.map((group) => group.turn), [2, 3, 4])
+  assert.equal(turnGroups[0].prePlugin, true)
+  assert.equal(turnGroups[1].folded, true)
 })
 
 test('没折叠且内容太少时标为内容较少', () => {
