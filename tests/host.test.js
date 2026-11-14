@@ -9,8 +9,8 @@ import { join } from 'node:path'
 import { assemble } from '../lib/host.js'
 import { FakeSession, assistantNode, makeCtx, toolNode, userNode } from './fakes.js'
 
-// setImmediate 排的折叠要等两拍才落地。
-const tick = () => new Promise((resolve) => setImmediate(() => setImmediate(resolve)))
+// 折叠是延时到下一拍定时器才落的，等两个 0ms 定时器就够。
+const tick = () => new Promise((resolve) => setTimeout(() => setTimeout(resolve, 0), 0))
 
 function emit(ctx, session, event) {
   session.seq = Math.max(session.seq, event.seq)
@@ -292,3 +292,107 @@ test('折叠摘要带文件清单，关键词检索能把这一轮找回来', as
   api.stop()
 })
 
+
+test('官方压缩把重要消息卷进摘要后，插件会把原文补发回来', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-cp')
+  session.seed([userNode(1, '开始', 'user'), assistantNode(2, { text: '答'.repeat(600) })])
+  const pin = await toolNamed(ctx, 'fold_pin').execute({ label: '接口约定', text: '字段名用 snake_case' }, { agent: { session } })
+  assert.equal(pin.ok, true)
+  const pinSeq = session.nodes.at(-1)
+
+  // 模拟官方压缩：把 [1..pinSeq] 整段换成一条 compact-checkpoint，pin 正在被遮蔽区间里。
+  const summary = {
+    id: 'cp1',
+    role: 'user',
+    content: [{ type: 'text', text: '（官方压缩摘要）' }],
+    source: { kind: 'compact-checkpoint', compactionId: 'cp1' },
+  }
+  const shadowed = session.nodes.slice()
+  const [checkpointEvent] = session.append('user/message', summary, {
+    surfaceOp: { op: 'replace', startSeq: 1, endSeq: pinSeq },
+    sourceEventSeqs: shadowed,
+  })
+  emit(ctx, session, {
+    type: 'user/message',
+    seq: checkpointEvent.seq,
+    data: summary,
+    surfaceOp: checkpointEvent.surfaceOp,
+    sourceEventSeqs: checkpointEvent.sourceEventSeqs,
+  })
+  await tick()
+
+  assert.ok(session.nodes.includes(checkpointEvent.seq), '压缩检查点不该被折掉')
+  const pins = session.events.filter((event) => event.data && event.data.source && event.data.source.kind === 'fold-pin')
+  assert.equal(pins.length, 2, '原 pin 一条、补发一条')
+  const last = pins.at(-1)
+  assert.equal(last.data.source.label, '接口约定')
+  assert.ok(last.data.content[0].text.includes('snake_case'))
+  assert.deepEqual(session.nodes, [checkpointEvent.seq, last.seq])
+
+  const rows = readFileSync(join(homeDir, 'fold-store', 'sess-cp.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+  const pinRows = rows.filter((row) => row.kind === 'pin')
+  assert.equal(pinRows.length, 2)
+  assert.equal(pinRows.at(-1).restored, true)
+  api.stop()
+})
+
+test('官方压缩没碰到重要消息时不重复补发', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-cp2')
+  session.seed([userNode(1, '开始', 'user'), assistantNode(2, { text: '答'.repeat(600) })])
+  const pin = await toolNamed(ctx, 'fold_pin').execute({ label: '接口约定', text: '保留' }, { agent: { session } })
+  assert.equal(pin.ok, true)
+
+  const summary = { id: 'cp2', role: 'user', content: [{ type: 'text', text: '（官方摘要）' }], source: { kind: 'compact-checkpoint' } }
+  const [checkpointEvent] = session.append('user/message', summary, {
+    surfaceOp: { op: 'replace', startSeq: 2, endSeq: 2 },
+    sourceEventSeqs: [2],
+  })
+  emit(ctx, session, { type: 'user/message', seq: checkpointEvent.seq, data: summary, surfaceOp: checkpointEvent.surfaceOp, sourceEventSeqs: checkpointEvent.sourceEventSeqs })
+  await tick()
+
+  const pins = session.events.filter((event) => event.data && event.data.source && event.data.source.kind === 'fold-pin')
+  assert.equal(pins.length, 1)
+  api.stop()
+})
+
+test('补发撞上 append 临界区会退避重试，不把重要消息丢掉', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-cp3')
+  session.seed([userNode(1, '开始', 'user'), assistantNode(2, { text: '答'.repeat(600) })])
+  const pin = await toolNamed(ctx, 'fold_pin').execute({ label: '约定', text: '别丢' }, { agent: { session } })
+  assert.equal(pin.ok, true)
+  const pinSeq = session.nodes.at(-1)
+
+  // 第一次补发模拟「发布临界区里不能 append」。
+  const original = session.append.bind(session)
+  let blocked = false
+  session.append = (type, data, opts) => {
+    if (!blocked && opts && opts.surfaceOp === 'append' && data && data.source && data.source.kind === 'fold-pin') {
+      blocked = true
+      throw new Error('session append cannot reenter while another append is being published')
+    }
+    return original(type, data, opts)
+  }
+
+  const summary = { id: 'cp3', role: 'user', content: [{ type: 'text', text: '（官方摘要）' }], source: { kind: 'compact-checkpoint' } }
+  const shadowed = session.nodes.slice()
+  const [checkpointEvent] = session.append('user/message', summary, {
+    surfaceOp: { op: 'replace', startSeq: 1, endSeq: pinSeq },
+    sourceEventSeqs: shadowed,
+  })
+  emit(ctx, session, { type: 'user/message', seq: checkpointEvent.seq, data: summary, surfaceOp: checkpointEvent.surfaceOp, sourceEventSeqs: checkpointEvent.sourceEventSeqs })
+
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  const pins = session.events.filter((event) => event.data && event.data.source && event.data.source.kind === 'fold-pin')
+  assert.equal(pins.length, 2, '重试后应当补发成功')
+  assert.equal(session.nodes.at(-1), pins.at(-1).seq)
+  api.stop()
+})

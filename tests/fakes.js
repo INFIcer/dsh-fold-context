@@ -6,6 +6,7 @@ export class FakeSession {
     this.seq = 0
     this.events = []
     this.nodes = []
+    this.bySeq = new Map()
   }
 
   get surface() {
@@ -19,6 +20,7 @@ export class FakeSession {
     const seq = ++this.seq
     const event = { type, seq, data, ...(opts || {}) }
     this.events.push(event)
+    this.bySeq.set(seq, { type, seq, data })
     const op = opts && opts.surfaceOp
     if (!op) throw new Error('surface event requires surfaceOp')
     if (op === 'append') {
@@ -42,8 +44,21 @@ export class FakeSession {
     for (const node of nodes) {
       this.seq = Math.max(this.seq, node.seq)
       this.nodes.push(node.seq)
+      this.bySeq.set(node.seq, node)
     }
     return this
+  }
+
+  // surface 当前对应的消息列表：真宿主有增量缓存，这里按 nodes 顺序现取。
+  deriveMessages() {
+    const out = []
+    for (const seq of this.nodes) {
+      const node = this.bySeq.get(seq)
+      if (!node) continue
+      const message = node.type === 'user/message' ? node.data : node.data && node.data.message
+      if (message) out.push(message)
+    }
+    return out
   }
 }
 

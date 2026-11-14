@@ -56,7 +56,7 @@ DSH 的模型可见内容必须能从会话日志重建，所以插件不改模�
 ## 触发点
 
 `agent/turn-stopping` 是轮即将关闭、`turn/end` 尚未落盘的串行钩子：此时不在任何 append 的发布临界区，可以同步写；`turn/end` 时本轮内容还没散，节点也齐全。
-作为兜底，`session/event` 观察到 `turn/end` 时在 `setImmediate` 之后补一次（观察者内同步 append 会撞上重入禁令）；已经折过的轮子再折一次是空操作，因为检查点本身属于「不折」的那一类。
+作为兜底，`session/event` 观察到 `turn/end` 时排一个 0ms 定时器再补一次（观察者内同步 append 会撞上重入禁令）；已经折过的轮子再折一次是空操作，因为检查点本身属于「不折」的那一类。
 
 ## 重要的信息为什么能不被折
 
@@ -80,6 +80,8 @@ DSH 的模型可见内容必须能从会话日志重建，所以插件不改模�
 
 插件不碰 `compaction/*` 事件，也不参与摘要生成，只在原来的压缩引擎之外做「低增速」这一层。
 两者可以并存：折叠管日常增速，compaction 管真正的超限清理。
+
+不过官方压缩的检查点（`source.kind === 'compact-checkpoint'`）必须当 keeper：它本身就是一次摘要，再折一次模型视角里连「哪一段被压过」都看不见。它替换掉的区间还会把 `fold_pin` 一起卷进摘要，所以插件在 `session/event` 里识别这种替换，延后一拍查 `session.deriveMessages()`，把缺席的 pin 用原文重新 append（编号不变），并在 `fold-store` 记 `restored: true`。
 
 ### token 口径
 

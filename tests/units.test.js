@@ -59,6 +59,8 @@ test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
   assert.equal(isKeeper(userNode(1, 'hi', 'user')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-pin')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-checkpoint')), true)
+  // 官方压缩的检查点也是一次摘要：再折一次模型就看不见「哪段被压过」了。
+  assert.equal(isKeeper(userNode(1, 'hi', 'compact-checkpoint')), true)
   // 调度提醒和运行时注入都是上下文，不是用户此刻说的话：折掉后仍能召回，下一轮还会重新注入。
   assert.equal(isKeeper(userNode(1, 'hi', 'schedule')), false)
   assert.equal(isKeeper(userNode(1, 'hi', 'runtime-context')), false)
@@ -237,6 +239,19 @@ test('FoldStore 忽略半行、按会话隔离、能统计召回次数', () => {
   const raw = readFileSync(store.filePath, 'utf8') + '{broken\n'
   assert.equal(raw.includes('broken'), true)
   assert.equal(store.readAll().length, 3)
+})
+
+test('重要消息按 label 去重：补发只更新内容，不重复计数', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const store = new FoldStore({ homeDir, sessionId: 'session-pins' })
+  store.append({ kind: 'pin', id: '接口约定', text: '旧内容', at: 1 })
+  store.append({ kind: 'pin', id: '另一条', text: '另一个', at: 2 })
+  store.append({ kind: 'pin', id: '接口约定', text: '新内容', at: 3, restored: true })
+  const pins = store.pins()
+  assert.equal(pins.length, 2)
+  assert.equal(pins[0].id, '接口约定')
+  assert.equal(pins[0].text, '新内容')
+  assert.equal(pins[1].id, '另一条')
 })
 
 test('注入消息撑满预算时，载荷仍然保住最终回复', () => {

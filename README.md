@@ -153,11 +153,12 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 
 ## 和 billion-context 共用
 
-billion-context（本地代理式压缩）与本插件在不同层工作：前者在请求发往模型之前重写历史，不写 DSH 会话日志；后者用 surface 替换把折叠结果落进日志。两者能同时跑，没有谁会把谁弄坏，但要知道这三件事：
+billion-context（本地代理式压缩）与本插件在不同层工作：前者在请求发往模型之前重写历史，不写 DSH 会话日志；后者用 surface 替换把折叠结果落进日志。两者能同时跑，没有谁会把谁弄坏，但要知道这四件事：
 
 1. **「永不折叠」只在本插件这一层成立。** billion-context 会把它的压缩块范围内的所有消息再摘要一遍，包括我们的检查点与 `fold_pin` 重要消息。模型可能看不到某条重要消息的原文，也看不到某轮的折叠编号；`fold_recall("f7")` 仍能凭本地 `fold-store` 按编号取回原文，所以编号别丢（它在检查点正文里）。
 2. **每次折叠都改变请求前缀。** billion-context 下一请求会按 resync 全量重发，这是它的账单成本；折叠本身不另外收费。
 3. **两边都在缩减历史，收益会重叠。** 账本上的「省下」是本插件这一层的；代理层再省多少，要看 billion-context 自己的统计。
+4. **官方压缩（`compaction-basic`）也不会吞掉重要消息。** 它把旧历史换成一条 `compact-checkpoint` 摘要。插件把这个检查点当 keeper（下一轮不再折它），并在看到这次替换后核对 surface：被卷进摘要的 `fold_pin` 会用原文重新 append 回末尾，`fold-store` 里记一条 `restored:true`。代价是压缩后前缀又多变一次——那次请求本来就会 resync。
 
 如果确实需要某些结论在代理层之上也常驻，可以把 `fold_pin` 的内容注入系统提示词（`PromptSection.text` 支持函数形态），代价是每次 pin 变化都会让前缀缓存失效一次；v1 没做。
 
