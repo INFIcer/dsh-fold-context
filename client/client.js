@@ -550,6 +550,17 @@ window.__ModuleLoader__.load({
       return chars / 4
     }
 
+    // 某一视角一块历史的总 token（七类相加）。画对照虚线用，独立于当前视图。
+    function compositionTotal(point, viewName, mode) {
+      var bucket = !point ? null : mode === 'step' ? point[viewName] : point.cumulative ? point.cumulative[viewName] : null
+      var sum = 0
+      for (var k = 0; k < COMPOSITION_KEYS.length; k += 1) {
+        var value = bucket && typeof bucket[COMPOSITION_KEYS[k]] === 'number' ? bucket[COMPOSITION_KEYS[k]] : 0
+        sum += value
+      }
+      return sum / 4
+    }
+
     // 纵轴上限取整到 1/2/5 的整数倍，刻度不出现 3.7 这种数。
     function niceCeil(value) {
       if (!(value > 0)) return 1
@@ -575,6 +586,9 @@ window.__ModuleLoader__.load({
       var plotHeight = height - padTop - padBottom
       var stacks = []
       var max = 0
+      var otherView = view === 'folded' ? 'unfolded' : 'folded'
+      var otherTotals = []
+      var otherMax = 0
       for (var i = 0; i < count; i += 1) {
         var running = 0
         var row = []
@@ -584,8 +598,12 @@ window.__ModuleLoader__.load({
         }
         stacks.push(row)
         if (running > max) max = running
+        var otherValue = compositionTotal(points[i], otherView, mode)
+        otherTotals.push(otherValue)
+        if (otherValue > otherMax) otherMax = otherValue
       }
-      var top = niceCeil(max)
+      // 纵轴上限要容得下两条线，否则另一视角的虚线会画出画布。
+      var top = niceCeil(Math.max(max, otherMax))
       function xAt(index) {
         return padLeft + (plotWidth * index) / (count - 1)
       }
@@ -614,6 +632,20 @@ window.__ModuleLoader__.load({
         path += 'Z'
         layers.push(h('path', { key: 'a' + c, d: path, fill: compositionColor(key), fillOpacity: 0.78, stroke: 'none' }))
       }
+      // 另一视角的累计总量：虚线，和面积共用纵轴，差额就是折叠省下的部分。
+      var otherPath = ''
+      for (var ri = 0; ri < count; ri += 1) {
+        otherPath += (ri === 0 ? 'M' : 'L') + xAt(ri).toFixed(1) + ',' + yAt(otherTotals[ri]).toFixed(1) + ' '
+      }
+      var otherLine = h('path', {
+        key: 'ref',
+        d: otherPath.trim(),
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.4,
+        strokeDasharray: '6 4',
+        opacity: 0.75,
+      })
       // 每个块一个透明热区，鼠标停上去看这块的折叠后 / 不折叠 token 数。
       var hover = []
       var sliceWidth = plotWidth / (count - 1)
@@ -638,7 +670,7 @@ window.__ModuleLoader__.load({
         if (!label) continue
         labels.push(h('text', { key: 'l' + li, x: xAt(li), y: height - 10, fontSize: 10, fill: 'currentColor', opacity: 0.6, textAnchor: 'middle' }, label))
       }
-      return h('svg', { viewBox: '0 0 ' + width + ' ' + height, style: C.chart }, grid.concat(layers, hover, labels))
+      return h('svg', { viewBox: '0 0 ' + width + ' ' + height, style: C.chart }, grid.concat(layers, [otherLine], hover, labels))
     }
 
     function CompositionPanel(props) {
@@ -726,7 +758,7 @@ window.__ModuleLoader__.load({
         h('div', { style: C.compLegend }, rows),
         h('div', { style: { marginTop: '12px' } }, viewToggle),
         h('div', { style: { marginTop: '10px' } }, h(CompositionChart, { points: points, view: view, mode: mode })),
-        h('div', { style: Object.assign({}, C.compNote, { marginTop: '6px' }) }, '横轴每格是一块历史：T = 轮次，S = 系统提示词的版本。折叠后与不折叠两条曲线都画在同一坐标里，切换视角对比。')
+        h('div', { style: Object.assign({}, C.compNote, { marginTop: '6px' }) }, '横轴每格是一块历史：T = 轮次，S = 系统提示词版本；面积是当前视角，虚线是另一视角的总量，两者共用纵轴，两条线的差就是折叠省下的量。')
       )
     }
 

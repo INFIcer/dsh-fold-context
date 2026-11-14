@@ -131,6 +131,8 @@ test('模型视角的构成面板、图表与重要消息行能渲染（冒烟�
   const chart = components.CompositionChart({ points: composition.points, view: 'unfolded', mode: 'step' })
   assert.equal(chart.type, 'svg')
   assert.ok(chart.children.length > 0)
+  // 面积画当前视角，另一视角用虚线对照，两个视角能同框比较
+  assert.ok(JSON.stringify(chart).includes('strokeDasharray'))
   // 一轮里带一条重要消息：卡片本身与消息行都要能构造出来
   const turn = components.TurnCard({
     group: {
