@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createReportHandler, createStatsHandler, registerStatsRoute, reportPath, statsPath } from '../lib/web.js'
+import {
+  configPath,
+  createConfigHandler,
+  createReportHandler,
+  createStatsHandler,
+  createViewHandler,
+  registerStatsRoute,
+  reportPath,
+  statsPath,
+  viewPath,
+} from '../lib/web.js'
 
 function fakeRes() {
   const state = { status: 0, headers: null, body: '' }
@@ -75,7 +85,7 @@ test('读载荷抛错时仍然回 200 的空账本', () => {
   assert.equal(JSON.parse(res.state.body).totals.folds, 0)
 })
 
-test('registerStatsRoute 挂 exact 路由并随 dispose 撤销', () => {
+test('registerStatsRoute 挂四条 exact 路由并随 dispose 撤销', () => {
   const routes = []
   const ctx = {
     webServer: {
@@ -86,14 +96,11 @@ test('registerStatsRoute 挂 exact 路由并随 dispose 撤销', () => {
     },
   }
   const handle = registerStatsRoute({ ctx, log: quietLog, makeStore: () => makeStore([]), getConfig: () => ({}) })
-  assert.equal(routes.length, 2)
-  assert.equal(routes[0].kind, 'exact')
-  assert.equal(routes[0].path, statsPath)
-  assert.equal(routes[1].kind, 'exact')
-  assert.equal(routes[1].path, reportPath)
+  assert.equal(routes.length, 4)
+  assert.deepEqual(routes.map((route) => route.path), [statsPath, reportPath, viewPath, configPath])
+  for (const route of routes) assert.equal(route.kind, 'exact')
   handle.dispose()
-  assert.equal(routes[0].disposed, true)
-  assert.equal(routes[1].disposed, true)
+  for (const route of routes) assert.equal(route.disposed, true)
 })
 
 test('没有 webServer 时静默降级', () => {
@@ -158,3 +165,132 @@ test('report 路由没有派生消息时给出说明页', () => {
   assert.equal(res.state.status, 200)
   assert.match(res.state.body, /还没有派生消息/)
 })
+function fakeBodyReq(url, method, body) {
+  const listeners = {}
+  const req = {
+    url,
+    method: method || 'POST',
+    headers: {},
+    on(event, handler) {
+      listeners[event] = handler
+      return req
+    },
+  }
+  queueMicrotask(() => {
+    if (listeners.data && body !== undefined) listeners.data(Buffer.from(body))
+    if (listeners.end) listeners.end()
+  })
+  return req
+}
+
+const demoMessages = [
+  { id: 'u1', role: 'user', content: [{ type: 'text', text: '把仓库放到 E 盘' }], source: { kind: 'user' } },
+  { id: 'a1', role: 'assistant', content: [{ type: 'reasoning', text: '先看目录' }, { type: 'text', text: '好的，开始搬。' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+]
+
+test('view 路由返回逐轮 JSON，且不带整段原文', () => {
+  const records = [
+    { kind: 'fold', id: 'f1', turn: 1, at: 1, chars: 900, note: '【已折叠历史】 第 1 轮已折叠，原文用 fold_recall("f1") 召回', items: [{ seq: 1, text: '[思考] ' + 'x'.repeat(400) }] },
+  ]
+  const handler = createViewHandler({
+    resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', demoMessages) : undefined),
+    makeStore: () => makeStore(records),
+    getConfig: () => ({ minFoldChars: 1200, recallDirectChars: 8000 }),
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq(viewPath + '?session=s1'), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.sessionId, 's1')
+  assert.ok(Array.isArray(body.groups) && body.groups.length > 0)
+  assert.equal(body.config.recallDirectChars, 8000)
+  for (const group of body.groups) {
+    for (const entry of group.entries) {
+      assert.equal('text' in entry, false)
+      assert.ok(Array.isArray(entry.blocks))
+    }
+  }
+  assert.ok(JSON.stringify(body).includes('先看目录'))
+})
+
+test('view 路由缺参数 400、找不到会话 404', () => {
+  const handler = createViewHandler({ resolveSessionById: () => undefined, makeStore: () => makeStore([]), getConfig: () => ({}), log: quietLog })
+  const missing = fakeRes()
+  handler(fakeReq(viewPath), missing)
+  assert.equal(missing.state.status, 400)
+  const gone = fakeRes()
+  handler(fakeReq(viewPath + '?session=gone'), gone)
+  assert.equal(gone.state.status, 404)
+})
+
+test('config 路由 GET 返回字段表、当前值与文件路径', () => {
+  const handler = createConfigHandler({
+    getConfig: () => ({ minFoldChars: 1500 }),
+    configFile: 'C:/Users/x/.dsh/fold-config.json',
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq(configPath), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.config.minFoldChars, 1500)
+  assert.equal(body.filePath, 'C:/Users/x/.dsh/fold-config.json')
+  const keys = body.fields.map((field) => field.key)
+  assert.ok(keys.includes('recallDirectChars'))
+  assert.ok(keys.includes('systemPromptText'))
+})
+
+test('config 路由 POST 走热更新，返回新配置', async () => {
+  const calls = []
+  const handler = createConfigHandler({
+    getConfig: () => ({ minFoldChars: 1200 }),
+    updateConfig: (patch) => {
+      calls.push(patch)
+      return { minFoldChars: 1200, ...patch }
+    },
+    configFile: 'C:/tmp/fold-config.json',
+    log: quietLog,
+  })
+  const res = fakeRes()
+  await handler(fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldChars: 900 } })), res)
+  assert.equal(res.state.status, 200)
+  assert.deepEqual(calls, [{ minFoldChars: 900 }])
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.config.minFoldChars, 900)
+  assert.deepEqual(body.changed, ['minFoldChars'])
+})
+
+test('config 路由 POST 拒绝非法值，且不调用 updateConfig', async () => {
+  let touched = false
+  const handler = createConfigHandler({
+    getConfig: () => ({}),
+    updateConfig: () => { touched = true; return {} },
+    configFile: 'C:/tmp/fold-config.json',
+    log: quietLog,
+  })
+  const res = fakeRes()
+  await handler(fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldChars: -5 } })), res)
+  assert.equal(res.state.status, 400)
+  assert.equal(touched, false)
+  assert.ok(JSON.parse(res.state.body).errors.length > 0)
+})
+
+test('config 路由 POST reset 用默认值覆盖', async () => {
+  const handler = createConfigHandler({
+    getConfig: () => ({ minFoldChars: 1200 }),
+    updateConfig: (patch) => patch,
+    configFile: 'C:/tmp/fold-config.json',
+    log: quietLog,
+  })
+  const res = fakeRes()
+  await handler(fakeBodyReq(configPath, 'POST', JSON.stringify({ reset: true })), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.config.minFoldChars, 1200)
+  assert.equal(body.config.recallDirectChars, 8000)
+})
+

@@ -9,7 +9,7 @@
 1. 轮结束（`agent/turn-stopping`）时，把本轮从第一条 `assistant/message` 到最后一个节点的区间整体替换成一条 `user/message` 检查点消息。
 2. 不折：用户原话、`fold_pin` 重要消息、上一次的检查点本身；单轮内容少于 `minFoldChars` 也不折。
 3. 检查点正文写清折叠了几步、几次工具调用、工具名、回复的开头与结尾，并给出 `fold_recall("f7")` 这类编号。
-4. 模型可调 `fold_recall` 取回原文（会累计召回次数，超过 `recallReminderAfter` 时要求模型用 `fold_pin` 固化结论）。
+4. 召回是分级的：`fold_recall("f7")` 在原文不超过 `recallDirectChars` 字时直接给全文；更长的先返回分段目录（段号、类型、字数、开头），模型再用 `fold_recall("f7", parts: ["1", "4-6"])` 或 `parts: ["think"]` / `["tools"]` 多选取回。内容召回会累计次数，超过 `recallReminderAfter` 时要求模型用 `fold_pin` 固化结论；只查目录不算。
 5. `fold_pin` 追加一条 `【重要·永不折叠】` 消息，永不被折叠。
 6. 系统提示词追加一段 `fold-compression`，说明机制与三个工具（`fold_recall`、`fold_pin`、`fold_config`）的用法。
 7. 模型可以用 `fold_config` 在会话中查看、修改或重置配置，不用重启。
@@ -37,7 +37,9 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 | `noteRatio` | `0.1` | 0.02~0.5 | 摘要按原文比例计算：`min(maxNoteChars, max(80, round(原文 * noteRatio)))` |
 | `recallReminderAfter` | `3` | 1~50 | 同一段召回超过几次就提醒固化 |
 | `recallReminderText` | 内置文案 | ≤2000 字 | 固化提醒，支持 `{count}` 与 `{tool}`；空串表示不提醒 |
-| `maxRecallChars` | `24000` | 1000~200000 | 单次召回返回的字符上限 |
+| `recallDirectChars` | `8000` | 1000~200000 | 原文不超过这个字数就整段返回，超过则先返回分段目录 |
+| `recallIndexPreviewChars` | `100` | 20~500 | 分段目录里每段预览的字数 |
+| `maxRecallChars` | `24000` | 1000~200000 | 单次召回返回的原文上限（也用作分段目录的字数上限） |
 | `maxPinTextChars` | `4000` | 200~20000 | 单条重要消息的正文上限 |
 | `maxPins` | `12` | 1~200 | 重要消息条数上限 |
 | `pinBudgetChars` | `12000` | 500~200000 | 全部重要消息的字符预算 |
@@ -88,7 +90,13 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 
 ## 顶栏「折叠」页
 
-插件自带客户端 bundle（`client/client.js`，手写 CJS，不需要构建），在会话顶栏注册一个「折叠」Tab（`conversation.view`，order 20）。页面每 5 秒拉一次同源 `GET /fold-stats?session=<会话 id>`，显示：
+插件自带客户端 bundle（`client/client.js`，手写 CJS，不需要构建），在会话顶栏注册一个「折叠」Tab（`conversation.view`，order 20）。页面分三个子页：
+
+- **账本**：每 5 秒拉一次同源 `GET /fold-stats?session=<会话 id>`，看 token 收支。
+- **模型视角**：拉 `GET /fold-view?session=<会话 id>`，按轮展示 `session.deriveMessages()` 派生出的真实历史——也就是折叠后模型实际收到的样子；折叠检查点展开可对照被替换掉的原文。
+- **设置**：`GET/POST /fold-config`，按字段表可视化编辑配置，保存即热生效，可一键恢复默认。
+
+账本页显示：
 
 - 四张卡：折叠收益（省下的 token、摘要保留率）、召回成本、重要消息成本、净收益。
 - 每轮收支条形图：中间是零轴，右侧绿条是折叠省下的 token，左侧红条是这一轮召回与重要消息的开销。
@@ -99,7 +107,7 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 
 页头右侧的「逐轮报告」按钮新窗口打开 `GET /fold-report?session=<会话 id>`：服务端按当前历史现算同一份逐轮 HTML，不落盘、不用先调工具。会话已不在进程里时返回 404 并说明原因。
 
-数据只来自 `fold-store` 的记录，不需要把会话拉起来；`/fold-stats` 与 `/fold-report` 都只接受 `GET`/`HEAD`，缺 `session` 参数返回 400。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响。
+`/fold-stats` 与 `/fold-report` 只读 `fold-store` 的记录，不需要把会话拉起来；`/fold-view` 需要会话还在进程里（它读的是派生消息）。这四个路由缺 `session` 参数返回 400，找不到会话返回 404；`/fold-config` 另接受 `POST`（`{patch}` 或 `{reset:true}`），其余路由只接受 `GET`/`HEAD`。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响。
 
 ## 已知限制
 
@@ -117,6 +125,7 @@ node tests/inspect.test.js
 node tests/turns.test.js
 node tests/stats.test.js
 node tests/web.test.js
+node tests/recall.test.js
 ```
 
 沙箱里 `node --test` 可能因 spawn 权限失败，直接按文件跑即可。
