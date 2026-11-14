@@ -4,6 +4,7 @@ import {
   buildFoldIndex,
   describeFold,
   foldParts,
+  kindChoices,
   normalizePartSelectors,
   renderFoldParts,
   selectFoldParts,
@@ -110,6 +111,23 @@ test('renderFoldParts 单次预算不够时截断并提示再召回', () => {
   const parts = foldParts(record)
   const text = renderFoldParts(record, parts, { total: parts.length, maxChars: 200 })
   assert.match(text, /还有 1 段没取回/)
+})
+
+test('kindChoices 只列真的存在的类型，没有回复段就不提 reply', () => {
+  const withReply = kindChoices(foldParts(record()))
+  assert.match(withReply, /think（思考）/)
+  assert.match(withReply, /reply（回复）/)
+  assert.match(withReply, /tools（调用与工具结果）/)
+  assert.match(withReply, /all（全部）/)
+
+  const onlyThink = record({ items: [{ seq: 1, text: '[思考] 只有思考' }, { seq: 2, text: '[工具结果] 结果' }] })
+  const noReply = kindChoices(foldParts(onlyThink))
+  assert.equal(noReply.includes('reply'), false)
+  assert.match(noReply, /think（思考）/)
+  assert.match(noReply, /tools（调用与工具结果）/)
+
+  const index = buildFoldIndex(record({ items: [{ seq: 1, text: '[思考] 只有思考' }] }), { previewChars: 10 })
+  assert.equal(index.includes('reply'), false)
 })
 
 test('describeFold 保留整段返回的旧格式', () => {
