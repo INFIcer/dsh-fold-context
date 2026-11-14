@@ -105,7 +105,7 @@ test('系统提示词按出现时间单独成块，绝不进任何一轮', () =>
       userEntry('第一句'),
       assistantEntry('答一句'),
     ],
-    minFoldChars: 1000,
+    minFoldTokens: 1000,
   })
   assert.deepEqual(groups.map((group) => group.kind), ['system', 'turn'])
   assert.equal(groups[0].chars, 100)
@@ -123,7 +123,7 @@ test('轮中出现的系统提示词就地切开当前轮，不并入相邻轮',
       entry({ role: 'system', chars: 50, text: '更新' }),
       assistantEntry('再答一句'),
     ],
-    minFoldChars: 1,
+    minFoldTokens: 1,
   })
   assert.deepEqual(groups.map((group) => group.kind), ['turn', 'system', 'turn'])
   const turnGroups = groups.filter((group) => group.kind === 'turn')
@@ -140,7 +140,7 @@ test('后一版系统提示词只带与前一版的差异，且系统块不参�
       assistantEntry('答一句'),
       entry({ role: 'system', chars: 5, text: 'a\nB\nc' }),
     ],
-    minFoldChars: 1,
+    minFoldTokens: 1,
   })
   assert.deepEqual(groups.map((group) => group.kind), ['system', 'turn', 'system'])
   assert.equal(groups[2].version, 2)
@@ -159,7 +159,7 @@ test('轮结束后落地的折叠检查点归上一轮，不另开一轮', () =>
       userEntry('第二句'),
       assistantEntry('答二'),
     ],
-    minFoldChars: 10,
+    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups.length, 2)
@@ -180,7 +180,7 @@ test('折叠轮没留回复原文时，把摘要里的回复开头当预览', ()
         items: [{ seq: 3, chars: 200, blocks: [{ kind: 'think', name: '', text: '想' }] }],
       }),
     ],
-    minFoldChars: 10,
+    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups[0].replyText, '')
@@ -196,7 +196,7 @@ test('轮次按用户消息顺序编号；第一个折叠轮之前标插件生�
       userEntry('新一轮'),
       checkpointEntry({ foldId: 'f9', noteChars: 30, items: [{ seq: 9, chars: 2000, blocks: [{ kind: 'reply', name: '', text: big }] }] }),
     ],
-    minFoldChars: 1000,
+    minFoldTokens: 1000,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups[0].turn, 1)
@@ -219,7 +219,7 @@ test('轮次以折叠记录里的 turn 为准，前后按相邻轮次推断', ()
       }),
       userEntry('第四句'),
     ],
-    minFoldChars: 10,
+    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.deepEqual(turnGroups.map((group) => group.turn), [2, 3, 4])
@@ -230,7 +230,7 @@ test('轮次以折叠记录里的 turn 为准，前后按相邻轮次推断', ()
 test('没折叠且内容太少时标为内容较少', () => {
   const groups = buildTurnGroups({
     entries: [userEntry('短'), assistantEntry('短答')],
-    minFoldChars: 1000,
+    minFoldTokens: 1000,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups[0].short, true)
@@ -250,7 +250,7 @@ test('下一轮的触发消息被折掉时，用检查点里的 turn 换轮', ()
       }),
       userEntry('第三句'),
     ],
-    minFoldChars: 10,
+    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.deepEqual(turnGroups.map((group) => group.turn), [1, 2, 3])
@@ -265,7 +265,7 @@ test('同一轮被切成多条检查点时不换轮', () => {
       checkpointEntry({ foldId: 'f1a', turn: 1, noteChars: 20, items: [] }),
       checkpointEntry({ foldId: 'f1b', turn: 1, noteChars: 20, items: [] }),
     ],
-    minFoldChars: 10,
+    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups.length, 1)

@@ -7,11 +7,11 @@
 ## 行为
 
 1. 轮结束（`agent/turn-stopping`）时，把本轮从第一条非保留消息到最后一个节点的区间整体替换成一条 `user/message` 检查点消息。
-2. 不折：真正的用户原话、调度器投递的用户指令、`fold_pin` 重要消息、上一次的检查点本身；单轮内容少于 `minFoldChars` 也不折。运行时上下文注入（`<system-reminder>`）算上下文，跟思考与工具输出一起折掉——折掉的内容下一轮会重新注入最新的一份，要旧的就 `fold_recall`。
+2. 不折：真正的用户原话、调度器投递的用户指令、`fold_pin` 重要消息、上一次的检查点本身；单轮内容少于 `minFoldTokens` 也不折。运行时上下文注入（`<system-reminder>`）算上下文，跟思考与工具输出一起折掉——折掉的内容下一轮会重新注入最新的一份，要旧的就 `fold_recall`。
 3. 检查点正文写清折叠了几步、几次工具调用、工具名、回复的开头与结尾，并给出 `fold_recall("f7")` 这类编号；另有一行「· 文件：改过 …；读过 …」记下这一轮碰过哪些文件——改过的要重读，只读过的不必整份重读。
-4. 召回是分级的：`fold_recall("f7")` 在原文不超过 `recallDirectChars` 字时直接给全文；更长的先返回分段目录（段号、类型、字数、开头），模型再用 `fold_recall("f7", parts: ["1", "4-6"])` 或 `parts: ["think"]` / `["tools"]` 多选取回。内容召回会累计次数，超过 `recallReminderAfter` 时要求模型用 `fold_pin` 固化结论；只查目录不算。载荷在折叠时就保存整段原文（含最终回复与完整的工具调用参数），召回限流只发生在返回时；载荷按会话受 `maxStoreChars` 约束，超了先清理最旧的折叠。
+4. 召回是分级的：`fold_recall("f7")` 在原文不超过 `recallDirectTokens` token 估算时直接给全文；更长的先返回分段目录（段号、类型、字数、开头），模型再用 `fold_recall("f7", parts: ["1", "4-6"])` 或 `parts: ["think"]` / `["tools"]` 多选取回。内容召回会累计次数，超过 `recallReminderAfter` 时要求模型用 `fold_pin` 固化结论；只查目录不算。载荷在折叠时就保存整段原文（含最终回复与完整的工具调用参数），召回限流只发生在返回时；载荷按会话受 `maxStoreTokens` token 约束，超了先清理最旧的折叠。
 5. 只记得关键词时用检索：`fold_recall({query: "lib/web.js"})` 扫全部折叠原文，只回折叠编号、段号与命中片段，不返回原文，也不计召回次数；拿到编号后再 `fold_recall({id: "f5", parts: ["2","4"]})` 取原文。`id` 与 `query` 同时给时，只在这条折叠里筛段。
-6. `fold_pin` 追加一条 `【重要·永不折叠】` 消息：本插件的按轮折叠不会折它；长会话里压缩层仍可能随时间把它并进摘要，插件不补发。账本会核对模型此刻可见的历史，把被卷走的 pin 标成「已压缩」并不再计入常驻占用（拿不到活会话时保持旧口径）。默认不设条数与长度上限：值不值得记交给模型判断，`maxPins` 与 `pinBudgetChars` 只有在显式设成正数时才作为软上限提示，不会拒绝发布。
+6. `fold_pin` 追加一条 `【重要·永不折叠】` 消息：本插件的按轮折叠不会折它；长会话里压缩层仍可能随时间把它并进摘要，插件不补发。账本会核对模型此刻可见的历史，把被卷走的 pin 标成「已压缩」并不再计入常驻占用（拿不到活会话时保持旧口径）。默认不设条数与长度上限：值不值得记交给模型判断，`maxPins` 与 `pinBudgetTokens` 只有在显式设成正数时才作为软上限提示，不会拒绝发布。
 7. 系统提示词追加一段 `fold-compression`，说明机制与三个工具（`fold_recall`、`fold_pin`、`fold_config`）的用法。
 8. 模型可以用 `fold_config` 在会话中查看、修改或重置配置，不用重启。
 
@@ -35,23 +35,23 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 | 字段 | 默认 | 范围 | 作用 |
 | --- | --- | --- | --- |
 | `enabled` | `true` | 布尔 | 总开关，关掉只留工具与提示词 |
-| `minFoldChars` | `1200` | 200~200000 | 一轮里思考+工具输出+回复的字符数低于此值不折 |
-| `maxNoteChars` | `320` | 80~4000 | 检查点里回复预览本身的长度上限（固定字数，与元信息无关）；回复不超上限时原样保留，超过才取开头+结尾 |
+| `minFoldTokens` | `300` | 50~50000 | 一轮里思考+工具输出+回复的 token 估算量低于此值不折（字符数/4） |
+| `maxNoteTokens` | `80` | 20~1000 | 检查点里回复预览本身的 token 估算上限（与元信息无关）；回复不超上限时原样保留，超过才取开头+结尾 |
 | `recallReminderAfter` | `3` | 1~50 | 同一段召回超过几次就提醒固化 |
 | `recallReminderText` | 内置文案 | ≤2000 字 | 固化提醒，支持 `{count}` 与 `{tool}`；空串表示不提醒 |
-| `recallDirectChars` | `8000` | 1000~200000 | 原文不超过这个字数就整段返回，超过则先返回分段目录 |
-| `recallIndexPreviewChars` | `100` | 20~500 | 分段目录里每段预览的字数 |
-| `maxRecallChars` | `24000` | 1000~200000 | 单次召回返回的原文上限（也用作分段目录与检索结果的字数上限） |
-| `searchPreviewChars` | `60` | 20~300 | 关键词检索结果里每段命中片段保留的字数 |
+| `recallDirectTokens` | `2000` | 250~50000 | 原文不超过这个 token 估算量就整段返回，超过则先返回分段目录 |
+| `recallIndexPreviewTokens` | `25` | 5~125 | 分段目录里每段预览的 token 估算量 |
+| `maxRecallTokens` | `6000` | 250~50000 | 单次召回返回的原文 token 估算上限（也用作分段目录与检索结果的额度） |
+| `searchPreviewTokens` | `15` | 5~75 | 关键词检索结果里每段命中片段保留的 token 估算量 |
 | `maxSearchFolds` | `8` | 1~50 | 关键词检索一次最多列几条折叠（更早的只给数量提示） |
-| `maxPinTextChars` | `0` | 0~200000 | 单条重要消息的正文上限，`0` 表示不截断；设成正数只截断、不拒绝 |
+| `maxPinTextTokens` | `0` | 0~50000 | 单条重要消息的正文 token 估算上限，`0` 表示不截断；设成正数只截断、不拒绝 |
 | `maxPins` | `0` | 0~100000 | 重要消息条数的软上限，`0` 表示不限制；超了照常发布，只提示 |
-| `pinBudgetChars` | `0` | 0~10000000 | 全部重要消息的字符软预算，`0` 表示不限制；超了照常发布，只提示 |
+| `pinBudgetTokens` | `0` | 0~2500000 | 全部重要消息的 token 估算软预算，`0` 表示不限制；超了照常发布，只提示 |
 | `systemPromptText` | 内置文案 | ≤20000 字 | 系统提示段，支持 `{{recallTool}}`、`{{pinTool}}`、`{{configTool}}`；空串表示不注入 |
 | `promptOrder` | `300` | -1000~10000 | 系统提示段的排序值，越小越靠前 |
-| `foldToolOutputs` | `true` | 布尔 | `false` 时工具输出既不进摘要、也不进召回载荷，也不计入 `minFoldChars` 的体量 |
+| `foldToolOutputs` | `true` | 布尔 | `false` 时工具输出既不进摘要、也不进召回载荷，也不计入 `minFoldTokens` 的体量 |
 | `maxFoldsPerTurn` | `8` | 1~32 | 一轮最多折成几段，超出的片段保留原文 |
-| `maxStoreChars` | `8000000` | 0~100000000 | 每个会话的 `fold-store` 载荷上限（字符），`0` 表示不限制；超了从最旧的折叠开始清理 |
+| `maxStoreTokens` | `2000000` | 0~25000000 | 每个会话的 `fold-store` 载荷 token 估算上限，`0` 表示不限制；超了从最旧的折叠开始清理 |
 | `cacheHitRate` | `0.97` | 0~1 | 前缀缓存的真实命中率（DeepSeek 实测约 97%）。只在没有 provider 回报时兜底；有回报时成本模型改用实测值 |
 | `priceCacheHitInput` | `0.02` | 0~1000 | 缓存命中输入单价，元 / 百万 token（DeepSeek 空闲时段官方价，高峰是两倍） |
 | `priceInput` | `1` | 0~1000 | 输入（未命中缓存）单价，元 / 百万 token（同上） |
@@ -62,7 +62,7 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 运行时用 `fold_config` 改配置：
 
 - `fold_config({ action: "get" })`：返回当前生效配置、配置文件路径与每项取值范围。
-- `fold_config({ action: "set", patch: { maxNoteChars: 400 } })`：只接受上表白名单键，逐项校验；通过后写文件并立即生效。非法键或越界值整批拒绝，不会出现「改了一半」。
+- `fold_config({ action: "set", patch: { maxNoteTokens: 400 } })`：只接受上表白名单键，逐项校验；通过后写文件并立即生效。非法键或越界值整批拒绝，不会出现「改了一半」。
 - `fold_config({ action: "reset" })`：把全部字段显式写成默认值并落盘，覆盖 profile 里的同名配置。
 
 手工改 `fold-config.json` 也可以，但要重启 DSH 才生效；想让改动立刻起作用，用 `fold_config`。
@@ -70,7 +70,7 @@ profile 的 `package.json` 里加 link 依赖并把包名加进 `dsh.profile.bun
 ## 数据落在哪
 
 - 会话日志：检查点与重要消息都是普通 `user/message`，`source.kind` 分别是 `fold-checkpoint`、`fold-pin`。恢复/分叉照原样重放，不依赖插件在线。
-- `$DSH_HOME/fold-store/<会话>.jsonl`：折叠原文、召回次数、重要消息快照。召回靠它，删掉就只能看到检查点的摘要行。文件在首次访问时解析一次，之后走内存索引；超过 `maxStoreChars` 时按会话从最旧的折叠开始清理，被清理的编号在召回时会明确说「已清理」，并保留一条 `prune` 记录。
+- `$DSH_HOME/fold-store/<会话>.jsonl`：折叠原文、召回次数、重要消息快照。召回靠它，删掉就只能看到检查点的摘要行。文件在首次访问时解析一次，之后走内存索引；超过 `maxStoreTokens` 时按会话从最旧的折叠开始清理，被清理的编号在召回时会明确说「已清理」，并保留一条 `prune` 记录。
 - `$DSH_HOME/dsh-fold-context.log`：运行日志。
 
 ## 可视化调试

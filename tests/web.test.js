@@ -45,7 +45,7 @@ test('stats 路由返回该会话的账本 JSON', () => {
   ]
   const handler = createStatsHandler({
     makeStore: (id) => (id === 's1' ? makeStore(records) : makeStore([])),
-    getConfig: () => ({ minFoldChars: 1200 }),
+    getConfig: () => ({ minFoldTokens: 300 }),
     log: quietLog,
   })
   const res = fakeRes()
@@ -57,7 +57,7 @@ test('stats 路由返回该会话的账本 JSON', () => {
   assert.equal(body.sessionId, 's1')
   assert.equal(body.totals.folds, 1)
   assert.equal(body.totals.pins, 1)
-  assert.equal(body.config.minFoldChars, 1200)
+  assert.equal(body.config.minFoldTokens, 300)
 })
 
 test('缺 session 参数时 400 且说明用法', () => {
@@ -167,7 +167,7 @@ test('report 路由渲染整页 HTML（含逐轮历史与折叠摘要）', () =>
   const handler = createReportHandler({
     resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', messages) : undefined),
     makeStore: () => makeStore(records),
-    getConfig: () => ({ minFoldChars: 1200 }),
+    getConfig: () => ({ minFoldTokens: 300 }),
     log: quietLog,
   })
   const res = fakeRes()
@@ -222,7 +222,7 @@ test('view 路由返回逐轮 JSON，且不带整段原文', () => {
   const handler = createViewHandler({
     resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', demoMessages) : undefined),
     makeStore: () => makeStore(records),
-    getConfig: () => ({ minFoldChars: 1200, recallDirectChars: 8000 }),
+    getConfig: () => ({ minFoldTokens: 1200, recallDirectTokens: 8000 }),
     log: quietLog,
   })
   const res = fakeRes()
@@ -232,7 +232,7 @@ test('view 路由返回逐轮 JSON，且不带整段原文', () => {
   assert.equal(body.ok, true)
   assert.equal(body.sessionId, 's1')
   assert.ok(Array.isArray(body.groups) && body.groups.length > 0)
-  assert.equal(body.config.recallDirectChars, 8000)
+  assert.equal(body.config.recallDirectTokens, 8000)
   for (const group of body.groups) {
     for (const entry of group.entries) {
       assert.equal('text' in entry, false)
@@ -316,7 +316,7 @@ test('composition 路由只回构成数据，格式与 view 的 composition 一�
   const handler = createCompositionHandler({
     resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', messages) : undefined),
     makeStore: () => makeStore([]),
-    getConfig: () => ({ minFoldChars: 1200 }),
+    getConfig: () => ({ minFoldTokens: 300 }),
     log: quietLog,
   })
   const res = fakeRes()
@@ -413,7 +413,7 @@ test('view 路由带上 provider 最近一次回报，供「实际请求」对�
 
 test('config 路由 GET 返回字段表、当前值与文件路径', () => {
   const handler = createConfigHandler({
-    getConfig: () => ({ minFoldChars: 1500 }),
+    getConfig: () => ({ minFoldTokens: 1500 }),
     configFile: 'C:/Users/x/.dsh/fold-config.json',
     log: quietLog,
   })
@@ -422,32 +422,32 @@ test('config 路由 GET 返回字段表、当前值与文件路径', () => {
   assert.equal(res.state.status, 200)
   const body = JSON.parse(res.state.body)
   assert.equal(body.ok, true)
-  assert.equal(body.config.minFoldChars, 1500)
+  assert.equal(body.config.minFoldTokens, 1500)
   assert.equal(body.filePath, 'C:/Users/x/.dsh/fold-config.json')
   const keys = body.fields.map((field) => field.key)
-  assert.ok(keys.includes('recallDirectChars'))
+  assert.ok(keys.includes('recallDirectTokens'))
   assert.ok(keys.includes('systemPromptText'))
 })
 
 test('config 路由 POST 走热更新，返回新配置', async () => {
   const calls = []
   const handler = createConfigHandler({
-    getConfig: () => ({ minFoldChars: 1200 }),
+    getConfig: () => ({ minFoldTokens: 300 }),
     updateConfig: (patch) => {
       calls.push(patch)
-      return { minFoldChars: 1200, ...patch }
+      return { minFoldTokens: 1200, ...patch }
     },
     configFile: 'C:/tmp/fold-config.json',
     log: quietLog,
   })
   const res = fakeRes()
-  await handler(fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldChars: 900 } })), res)
+  await handler(fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldTokens: 900 } })), res)
   assert.equal(res.state.status, 200)
-  assert.deepEqual(calls, [{ minFoldChars: 900 }])
+  assert.deepEqual(calls, [{ minFoldTokens: 900 }])
   const body = JSON.parse(res.state.body)
   assert.equal(body.ok, true)
-  assert.equal(body.config.minFoldChars, 900)
-  assert.deepEqual(body.changed, ['minFoldChars'])
+  assert.equal(body.config.minFoldTokens, 900)
+  assert.deepEqual(body.changed, ['minFoldTokens'])
 })
 
 test('config 路由 POST 拒绝非法值，且不调用 updateConfig', async () => {
@@ -459,7 +459,7 @@ test('config 路由 POST 拒绝非法值，且不调用 updateConfig', async () 
     log: quietLog,
   })
   const res = fakeRes()
-  await handler(fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldChars: -5 } })), res)
+  await handler(fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldTokens: -5 } })), res)
   assert.equal(res.state.status, 400)
   assert.equal(touched, false)
   assert.ok(JSON.parse(res.state.body).errors.length > 0)
@@ -467,7 +467,7 @@ test('config 路由 POST 拒绝非法值，且不调用 updateConfig', async () 
 
 test('config 路由 POST reset 用默认值覆盖', async () => {
   const handler = createConfigHandler({
-    getConfig: () => ({ minFoldChars: 1200 }),
+    getConfig: () => ({ minFoldTokens: 300 }),
     updateConfig: (patch) => patch,
     configFile: 'C:/tmp/fold-config.json',
     log: quietLog,
@@ -476,8 +476,8 @@ test('config 路由 POST reset 用默认值覆盖', async () => {
   await handler(fakeBodyReq(configPath, 'POST', JSON.stringify({ reset: true })), res)
   assert.equal(res.state.status, 200)
   const body = JSON.parse(res.state.body)
-  assert.equal(body.config.minFoldChars, 1200)
-  assert.equal(body.config.recallDirectChars, 8000)
+  assert.equal(body.config.minFoldTokens, 300)
+  assert.equal(body.config.recallDirectTokens, 2000)
 })
 
 test('/fold-* 只允许本机同源：非回环 Host、跨站 Origin、非 JSON POST 都 403', async () => {
@@ -508,13 +508,13 @@ test('/fold-* 只允许本机同源：非回环 Host、跨站 Origin、非 JSON 
   assert.equal(sameOrigin.state.status, 200)
 
   const config = routes.find((route) => route.path === configPath)
-  const plain = fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldChars: 900 } }))
+  const plain = fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldTokens: 900 } }))
   plain.headers = { host: '127.0.0.1:3633', origin: 'http://127.0.0.1:3633', 'content-type': 'text/plain' }
   const denied = fakeRes()
   await config.handler(plain, denied)
   assert.equal(denied.state.status, 403, '简单请求（text/plain）带不了 JSON，CSRF 进不来')
 
-  const json = fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldChars: 900 } }))
+  const json = fakeBodyReq(configPath, 'POST', JSON.stringify({ patch: { minFoldTokens: 900 } }))
   json.headers = { host: '127.0.0.1:3633', origin: 'http://127.0.0.1:3633', 'content-type': 'application/json' }
   const allowed = fakeRes()
   await config.handler(json, allowed)

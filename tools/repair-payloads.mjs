@@ -48,7 +48,7 @@ export function rebuildItems(record, bySeq, includeToolOutputs) {
   const nodes = expectedSeqs(record, bySeq, includeToolOutputs)
     .map((seq) => bySeq.get(seq))
     .filter(Boolean)
-  // 预算交给召回时控制（maxRecallChars），写入侧不设上限，否则又会从尾部截断。
+  // 预算交给召回时控制（maxRecallTokens），写入侧不设上限，否则又会从尾部截断。
   return recallItems(nodes, Number.MAX_SAFE_INTEGER, includeToolOutputs)
 }
 

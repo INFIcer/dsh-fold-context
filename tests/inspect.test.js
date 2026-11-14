@@ -72,7 +72,7 @@ function demoModel() {
     folds,
     pins: [{ kind: 'pin', id: '部署路径', text: '在 E:\\dsh\\deploy.ps1', at: 3000 }],
     recalls: [{ kind: 'recall', id: 'f1', at: 1500 }, { kind: 'recall', id: 'f1', at: 1600 }],
-    config: { enabled: true, minFoldChars: 1200, recallReminderAfter: 3 },
+    config: { enabled: true, minFoldTokens: 1200, recallReminderAfter: 3 },
     now: Date.UTC(2026, 10, 14, 4, 0, 0),
   })
 }

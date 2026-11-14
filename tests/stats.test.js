@@ -42,7 +42,7 @@ test('buildStats 按轮收拢收益与成本', () => {
     { kind: 'recall', id: 'f1', turn: 2, at: 2002, chars: 40, tokens: 14 },
     { kind: 'pin', id: 'P', turn: 1, at: 2001, text: pinText },
   ]
-  const stats = buildStats({ records, config: { minFoldChars: 1200 }, now: 3000 })
+  const stats = buildStats({ records, config: { minFoldTokens: 1200 }, now: 3000 })
   assert.equal(stats.ok, true)
   assert.equal(stats.totals.folds, 2)
   assert.equal(stats.totals.recalls, 1)

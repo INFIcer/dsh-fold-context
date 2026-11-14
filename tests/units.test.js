@@ -48,7 +48,7 @@ test('statsOf 只统计思考、回复与工具输出', () => {
 
 test('buildNote 带上编号与召回入口，短回复整段保留', () => {
   const stats = statsOf([assistantNode(2, { reasoning: 'x'.repeat(300), text: 'y'.repeat(80) })])
-  const note = buildNote({ foldId: 'f7', turn: 7, stats, maxChars: 200, toolName: 'fold_recall' })
+  const note = buildNote({ foldId: 'f7', turn: 7, stats, maxTokens: 50, toolName: 'fold_recall' })
   assert.ok(note.startsWith('【已折叠历史】'))
   assert.ok(note.includes('f7'))
   assert.ok(note.includes('fold_recall'))
@@ -59,17 +59,17 @@ test('buildNote 带上编号与召回入口，短回复整段保留', () => {
 
 test('回复超过上限才拆成开头+结尾，且预览合计不超上限', () => {
   const stats = statsOf([assistantNode(2, { reasoning: 'x'.repeat(300), text: 'y'.repeat(400) })])
-  const note = buildNote({ foldId: 'f8', turn: 8, stats, maxChars: 200, toolName: 'fold_recall' })
+  const note = buildNote({ foldId: 'f8', turn: 8, stats, maxTokens: 50, toolName: 'fold_recall' })
   const match = note.match(/开头「([^」]*)…」，结尾「…([^」]*)」/)
   assert.ok(match, note)
   assert.ok(match[1].length + match[2].length <= 200, note)
   assert.ok(match[1].length > match[2].length, '开头分到约 3/4 的篇幅')
 })
 
-test('maxNoteChars 调大后预览随之变长，且不重复展示', () => {
+test('maxNoteTokens 调大后预览随之变长，且不重复展示', () => {
   const stats = statsOf([assistantNode(2, { reasoning: 'x'.repeat(300), text: 'y'.repeat(500) })])
-  const small = buildNote({ foldId: 'f9', turn: 9, stats, maxChars: 80, toolName: 'fold_recall' })
-  const large = buildNote({ foldId: 'f9', turn: 9, stats, maxChars: 600, toolName: 'fold_recall' })
+  const small = buildNote({ foldId: 'f9', turn: 9, stats, maxTokens: 20, toolName: 'fold_recall' })
+  const large = buildNote({ foldId: 'f9', turn: 9, stats, maxTokens: 150, toolName: 'fold_recall' })
   const preview = (note) => {
     const m = note.match(/· 回复约 500 字：([\s\S]*)$/)
     if (m) return m[1]
@@ -168,7 +168,7 @@ test('foldTurn 折叠够长的一轮，并留下可召回的载荷', () => {
   ]
   session.seed(nodes)
   const store = new FoldStore({ homeDir, sessionId: session.id })
-  const config = normalizeConfig({ minFoldChars: 1200 })
+  const config = normalizeConfig({ minFoldTokens: 300 })
 
   const result = foldTurn({
     session,
@@ -203,7 +203,7 @@ test('foldTurn 对短回合与关闭开关都不动手', () => {
   session.seed(nodes)
   const store = new FoldStore({ homeDir, sessionId: session.id })
 
-  const short = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({ minFoldChars: 1200 }), store, log: silent })
+  const short = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({ minFoldTokens: 300 }), store, log: silent })
   assert.equal(short.folded, 0)
 
   const off = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({ enabled: false }), store, log: silent })
@@ -251,16 +251,16 @@ test('publishPin 默认不设条数与长度上限，软上限只提示不拒绝
   assert.ok(message.data.content[0].text.includes(long), '默认不截断正文')
 
   // 显式设成软上限后仍然发布，只在返回里提示。
-  const soft = normalizeConfig({ maxPins: 2, pinBudgetChars: 10 })
+  const soft = normalizeConfig({ maxPins: 2, pinBudgetTokens: 10 })
   const over = publishPin({ session, label: '再多一条', text: '内容', config: soft, store, log: silent })
   assert.equal(over.ok, true)
   assert.ok(over.note.includes('软上限'))
   assert.ok(over.note.includes('软预算'))
 
   // 显式设长度上限时只截断，不拒绝。
-  const clipped = publishPin({ session, label: '截断', text: '字'.repeat(50), config: normalizeConfig({ maxPinTextChars: 10 }), store, log: silent })
+  const clipped = publishPin({ session, label: '截断', text: '字'.repeat(50), config: normalizeConfig({ maxPinTextTokens: 10 }), store, log: silent })
   assert.equal(clipped.ok, true)
-  assert.ok(clipped.chars <= 11, '截断后是 10 字加省略号')
+  assert.ok(clipped.chars <= 41, '截断后是 40 字加省略号')
   assert.ok(clipped.note.includes('截断'))
 })
 
@@ -313,7 +313,7 @@ test('注入消息撑满预算时，载荷仍然保住最终回复', () => {
     session,
     turn: 1,
     nodes,
-    config: normalizeConfig({ minFoldChars: 1200 }),
+    config: normalizeConfig({ minFoldTokens: 300 }),
     store,
     log: silent,
   })
@@ -332,30 +332,30 @@ test('recallItems 按预算截断', () => {
 })
 
 test('normalizeConfig 把越界值钳进合法区间', () => {
-  const config = normalizeConfig({ minFoldChars: 1, maxPins: 999 })
-  assert.equal(config.minFoldChars, 200)
+  const config = normalizeConfig({ minFoldTokens: 1, maxPins: 999 })
+  assert.equal(config.minFoldTokens, 50)
   assert.equal(config.maxPins, 999)
   assert.equal(normalizeConfig({ maxPins: 1000000 }).maxPins, 100000)
-  assert.equal(normalizeConfig({ maxPinTextChars: -5 }).maxPinTextChars, 0)
+  assert.equal(normalizeConfig({ maxPinTextTokens: -5 }).maxPinTextTokens, 0)
   assert.equal(defaultConfig().enabled, true)
 })
 
 test('normalizeConfig 覆盖新增字段的钳制与类型守卫', () => {
   const low = normalizeConfig({
-    maxNoteChars: 10,
+    maxNoteTokens: 10,
     recallReminderAfter: 0,
     maxFoldsPerTurn: 99,
     promptOrder: -5000,
     foldToolOutputs: 'no',
   })
-  assert.equal(low.maxNoteChars, 80)
+  assert.equal(low.maxNoteTokens, 20)
   assert.equal(low.recallReminderAfter, 1)
   assert.equal(low.maxFoldsPerTurn, 32)
   assert.equal(low.promptOrder, -1000)
   assert.equal(low.foldToolOutputs, true, '类型不对时保留原值')
 
-  const high = normalizeConfig({ maxNoteChars: 99999, promptOrder: 99999 })
-  assert.equal(high.maxNoteChars, 4000)
+  const high = normalizeConfig({ maxNoteTokens: 99999, promptOrder: 99999 })
+  assert.equal(high.maxNoteTokens, 1000)
   assert.equal(high.promptOrder, 10000)
 })
 
@@ -409,8 +409,8 @@ test('pricing 用默认价兜底，金额按百万 token 折算', () => {
 
 test('normalizeConfig 忽略未知键并回调 warn', () => {
   const warnings = []
-  const config = normalizeConfig({ bogus: 1, minFoldChars: 300 }, defaultConfig(), (message) => warnings.push(message))
-  assert.equal(config.minFoldChars, 300)
+  const config = normalizeConfig({ bogus: 1, minFoldTokens: 300 }, defaultConfig(), (message) => warnings.push(message))
+  assert.equal(config.minFoldTokens, 300)
   assert.equal(Object.prototype.hasOwnProperty.call(config, 'bogus'), false)
   assert.equal(warnings.length, 1)
   assert.ok(warnings[0].includes('bogus'))
@@ -418,9 +418,9 @@ test('normalizeConfig 忽略未知键并回调 warn', () => {
 })
 
 test('noteChars 取固定上限，不随原文长短变化', () => {
-  assert.equal(noteChars(normalizeConfig({})), 320)
-  assert.equal(noteChars(normalizeConfig({ maxNoteChars: 900 })), 900)
-  assert.equal(noteChars({}), 320)
+  assert.equal(noteChars(normalizeConfig({})), 80)
+  assert.equal(noteChars(normalizeConfig({ maxNoteTokens: 900 })), 900)
+  assert.equal(noteChars({}), 80)
 })
 
 test('buildNote 的长度上限只约束回复行，元信息不被截断', () => {
@@ -431,56 +431,56 @@ test('buildNote 的长度上限只约束回复行，元信息不被截断', () =
       calls: [{ id: 'c1', name: 'read', args: { file_path: 'E:/repo/lib/web.js' } }],
     }),
   ])
-  const long = buildNote({ foldId: 'f3', turn: 3, stats, maxChars: 120, toolName: 'fold_recall' })
+  const long = buildNote({ foldId: 'f3', turn: 3, stats, maxTokens: 30, toolName: 'fold_recall' })
   assert.ok(long.includes('【已折叠历史】 第 3 轮'), long)
   assert.ok(long.includes('· 文件：读过 lib/web.js'), long)
   const match = long.match(/· 回复约 4000 字，开头「([^」]*)…」，结尾「…([^」]*)」/)
   assert.ok(match, long)
   // 预览文字本身不超过上限；元信息（编号/文件行）在它之外，不被挤掉。
   assert.ok(match[1].length + match[2].length <= 120, long)
-  const short = buildNote({ foldId: 'f4', turn: 4, stats: { ...stats, replyChars: 0 }, maxChars: 80, toolName: 'fold_recall' })
+  const short = buildNote({ foldId: 'f4', turn: 4, stats: { ...stats, replyChars: 0 }, maxTokens: 20, toolName: 'fold_recall' })
   assert.ok(short.includes('· 文件：读过 lib/web.js'), short)
 })
 
 test('ConfigStore 只把显式改过的键写进文件层，profile 的其它值不被冻结', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
   const store = new ConfigStore({ homeDir, log: silent })
-  store.load({ minFoldChars: 900 })
-  assert.equal(store.get().minFoldChars, 900)
+  store.load({ minFoldTokens: 900 })
+  assert.equal(store.get().minFoldTokens, 900)
 
-  const saved = store.save({ maxNoteChars: 400 })
-  assert.equal(saved.maxNoteChars, 400)
+  const saved = store.save({ maxNoteTokens: 400 })
+  assert.equal(saved.maxNoteTokens, 400)
   const raw = JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8'))
-  assert.equal(raw.maxNoteChars, 400)
+  assert.equal(raw.maxNoteTokens, 400)
   // 早先把合并后的 current 整份写盘，profile 的 900 会被冻结进文件，之后改 profile 永远不生效。
-  assert.equal(raw.minFoldChars, undefined, 'profile 的值不写进文件')
+  assert.equal(raw.minFoldTokens, undefined, 'profile 的值不写进文件')
 
   const again = new ConfigStore({ homeDir, log: silent })
-  const loaded = again.load({ minFoldChars: 300 })
-  assert.equal(loaded.minFoldChars, 300, 'profile 改了，文件没覆盖这个键，就跟着 profile 走')
-  assert.equal(loaded.maxNoteChars, 400)
+  const loaded = again.load({ minFoldTokens: 300 })
+  assert.equal(loaded.minFoldTokens, 300, 'profile 改了，文件没覆盖这个键，就跟着 profile 走')
+  assert.equal(loaded.maxNoteTokens, 400)
 
   // reset 必须是「显式写入默认值」：只清文件层的话，重启后 profile 又把它盖回去。
   again.reset()
-  assert.equal(again.get().minFoldChars, 1200)
+  assert.equal(again.get().minFoldTokens, 300)
   const resetRaw = JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8'))
-  assert.equal(resetRaw.minFoldChars, 1200)
+  assert.equal(resetRaw.minFoldTokens, 300)
   const third = new ConfigStore({ homeDir, log: silent })
-  assert.equal(third.load({ minFoldChars: 300 }).minFoldChars, 1200, '默认值压过 profile')
+  assert.equal(third.load({ minFoldTokens: 300 }).minFoldTokens, 300, '默认值压过 profile')
 })
 
 test('validateConfigPatch 只收白名单键，且逐项拒绝非法值', () => {
-  const ok = validateConfigPatch({ maxNoteChars: 400, foldToolOutputs: false })
+  const ok = validateConfigPatch({ maxNoteTokens: 400, foldToolOutputs: false })
   assert.equal(ok.ok, true)
-  assert.deepEqual(ok.patch, { maxNoteChars: 400, foldToolOutputs: false })
+  assert.deepEqual(ok.patch, { maxNoteTokens: 400, foldToolOutputs: false })
 
   const unknown = validateConfigPatch({ nope: 1 })
   assert.equal(unknown.ok, false)
   assert.ok(unknown.errors.join(' ').includes('未知配置项 nope'))
 
-  const range = validateConfigPatch({ maxNoteChars: 5000 })
+  const range = validateConfigPatch({ maxNoteTokens: 5000 })
   assert.equal(range.ok, false)
-  assert.ok(range.errors.join(' ').includes('80~4000'))
+  assert.ok(range.errors.join(' ').includes('20~1000'))
 
   const integer = validateConfigPatch({ maxFoldsPerTurn: 2.5 })
   assert.equal(integer.ok, false)
@@ -496,9 +496,9 @@ test('systemPromptText 支持占位替换与自定义文案', () => {
   assert.ok(text.includes('fold_recall'))
   assert.ok(text.includes('fold_pin'))
   assert.ok(text.includes('fold_config'))
-  assert.ok(text.includes('maxNoteChars'))
+  assert.ok(text.includes('maxNoteTokens'))
 
-  const custom = systemPromptText({ maxNoteChars: 400, systemPromptText: '召回 {{recallTool}}，固化 {{pinTool}}，调 {{configTool}}，未知 {{keep}}' })
+  const custom = systemPromptText({ maxNoteTokens: 400, systemPromptText: '召回 {{recallTool}}，固化 {{pinTool}}，调 {{configTool}}，未知 {{keep}}' })
   assert.ok(custom.includes('召回 fold_recall'))
   assert.ok(custom.includes('未知 {{keep}}'), '未知占位原样保留')
   assert.equal(systemPromptText({ systemPromptText: '' }), '')
@@ -530,7 +530,7 @@ test('foldToolOutputs=false 时摘要、体量与召回载荷都不含工具输�
   ])
   assert.equal(totalChars(stats), 900)
   assert.equal(totalChars(stats, false), 400)
-  const note = buildNote({ foldId: 'f1', turn: 1, stats, maxChars: 300, toolName: 'fold_recall', includeToolOutputs: false })
+  const note = buildNote({ foldId: 'f1', turn: 1, stats, maxTokens: 75, toolName: 'fold_recall', includeToolOutputs: false })
   assert.equal(note.includes('工具输出'), false)
   const items = recallItems([toolNode(3, 'c1', '秘密')], 1000, false)
   assert.equal(items.length, 0)
@@ -548,7 +548,7 @@ test('foldToolOutputs=false 时摘要、体量与召回载荷都不含工具输�
     session,
     turn: 1,
     nodes,
-    config: normalizeConfig({ minFoldChars: 1200, foldToolOutputs: false }),
+    config: normalizeConfig({ minFoldTokens: 300, foldToolOutputs: false }),
     store,
     log: silent,
   })
@@ -572,7 +572,7 @@ test('foldTurn 用 maxFoldsPerTurn 限制每轮折几段', () => {
     session,
     turn: 1,
     nodes,
-    config: normalizeConfig({ minFoldChars: 200, maxFoldsPerTurn: 2 }),
+    config: normalizeConfig({ minFoldTokens: 50, maxFoldsPerTurn: 2 }),
     store,
     log: silent,
   })
@@ -603,32 +603,32 @@ test('fold_config 支持 get/set/reset，并拒绝非法键', async () => {
 
   const got = await tool.execute({ action: 'get' }, {})
   assert.equal(got.ok, true)
-  assert.ok(got.text.includes('maxNoteChars'))
-  assert.ok(got.text.includes('80~4000'))
-  assert.equal(got.config.maxNoteChars, 320)
+  assert.ok(got.text.includes('maxNoteTokens'))
+  assert.ok(got.text.includes('20~1000'))
+  assert.equal(got.config.maxNoteTokens, 80)
   assert.equal(got.filePath, join(homeDir, 'fold-config.json'))
 
-  const set = await tool.execute({ action: 'set', patch: { maxNoteChars: 400 } }, {})
+  const set = await tool.execute({ action: 'set', patch: { maxNoteTokens: 400 } }, {})
   assert.equal(set.ok, true)
   assert.equal(updates.length, 1)
-  assert.equal(configStore.get().maxNoteChars, 400)
-  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).maxNoteChars, 400)
+  assert.equal(configStore.get().maxNoteTokens, 400)
+  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).maxNoteTokens, 400)
 
   const badKey = await tool.execute({ action: 'set', patch: { nope: 1 } }, {})
   assert.equal(badKey.ok, false)
   assert.ok(badKey.text.includes('未知配置项 nope'))
   assert.equal(updates.length, 1, '非法 patch 不能触发热更新')
-  assert.equal(configStore.get().maxNoteChars, 400)
+  assert.equal(configStore.get().maxNoteTokens, 400)
 
-  const badRange = await tool.execute({ action: 'set', patch: { maxNoteChars: 10 } }, {})
+  const badRange = await tool.execute({ action: 'set', patch: { maxNoteTokens: 10 } }, {})
   assert.equal(badRange.ok, false)
-  assert.ok(badRange.text.includes('80~4000'))
+  assert.ok(badRange.text.includes('20~1000'))
 
   const reset = await tool.execute({ action: 'reset' }, {})
   assert.equal(reset.ok, true)
-  assert.equal(configStore.get().maxNoteChars, 320)
-  // reset 把默认值显式写进文件层，所以 maxNoteChars 是 320 而不是「键消失」。
-  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).maxNoteChars, 320)
+  assert.equal(configStore.get().maxNoteTokens, 80)
+  // reset 把默认值显式写进文件层，所以 maxNoteTokens 是 320 而不是「键消失」。
+  assert.equal(JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8')).maxNoteTokens, 80)
 })
 
 test('statsOf 记下改过与读过的文件', () => {
@@ -681,7 +681,7 @@ test('buildNote 带上文件行，且在预算内优先保住它', () => {
       calls: [{ id: 'c1', name: 'read', args: { file_path: 'E:/repo/lib/web.js' } }],
     }),
   ])
-  const note = buildNote({ foldId: 'f9', turn: 9, stats, maxChars: 600, toolName: 'fold_recall' })
+  const note = buildNote({ foldId: 'f9', turn: 9, stats, maxTokens: 150, toolName: 'fold_recall' })
   assert.ok(note.includes('· 文件：读过 lib/web.js'), note)
   // 回复 400 字没超过 600 上限：整段保留，不重复展示。
   assert.ok(note.includes('y'.repeat(400)), note)
@@ -874,5 +874,5 @@ test('ConfigStore 写盘失败时抛错，不假装成功', () => {
   writeFileSync(blocker, 'x')
   const store = new ConfigStore({ homeDir: blocker, log: silent })
   store.load({})
-  assert.throws(() => store.save({ maxNoteChars: 400 }), /写配置文件失败/)
+  assert.throws(() => store.save({ maxNoteTokens: 400 }), /写配置文件失败/)
 })
