@@ -241,12 +241,12 @@ test('FoldStore 忽略半行、按会话隔离、能统计召回次数', () => {
   assert.equal(store.readAll().length, 3)
 })
 
-test('重要消息按 label 去重：补发只更新内容，不重复计数', () => {
+test('重要消息按 label 去重：保留最新内容，不重复计数', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
   const store = new FoldStore({ homeDir, sessionId: 'session-pins' })
   store.append({ kind: 'pin', id: '接口约定', text: '旧内容', at: 1 })
   store.append({ kind: 'pin', id: '另一条', text: '另一个', at: 2 })
-  store.append({ kind: 'pin', id: '接口约定', text: '新内容', at: 3, restored: true })
+  store.append({ kind: 'pin', id: '接口约定', text: '新内容', at: 3 })
   const pins = store.pins()
   assert.equal(pins.length, 2)
   assert.equal(pins[0].id, '接口约定')
