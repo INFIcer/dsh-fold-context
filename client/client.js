@@ -1,4 +1,5 @@
-// 顶栏「折叠」页：账本（token 收支）、模型视角（折叠后模型真正看到的历史）、设置（可视化改配置）。
+// 顶栏「折叠」页：账本（token 收支）、模型视角（折叠后模型真正看到的历史）。
+// 参数表单另外注册到原生「插件」页的组合包配置位（plugins.bundle.config），不占顶栏。
 //
 // 为什么手写 bundle：DSH 客户端插件就是 CJS + require 的产物，不需要构建链；
 // 这个文件直接被 /plugins/<包名>/client.js 加载。渲染只用 react.createElement，不依赖 JSX。
@@ -506,7 +507,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ---------- 设置 ----------
+    // ---------- 插件设置页（渲染在侧栏「插件」页的 dsh-fold-plugin 页面上） ----------
     function fieldRange(field) {
       if (!field) return ''
       var base = field.kind === 'boolean'
@@ -668,10 +669,10 @@ window.__ModuleLoader__.load({
       if (!sessionId) {
         return h('div', { style: C.panel }, h('div', { style: C.notice }, '切换到具体会话后，这里显示该会话的折叠情况。'))
       }
-      var tabs = [['ledger', '账本'], ['model', '模型视角'], ['settings', '设置']]
+      var tabs = [['ledger', '账本'], ['model', '模型视角']]
       var header = h('div', { style: C.row },
         h('div', { style: C.title }, '上下文折叠'),
-        h('div', { style: C.sub }, '按轮折叠 · 折叠算收益，召回与重要消息算成本'),
+        h('div', { style: C.sub }, '按轮折叠 · 折叠算收益，召回与重要消息算成本 · 参数在侧栏「插件」页的 dsh-fold-plugin 页面里调'),
         h('div', { style: { flex: 1 } }),
         h('a', {
           style: Object.assign({}, C.button, { textDecoration: 'none', display: 'inline-block' }),
@@ -689,9 +690,7 @@ window.__ModuleLoader__.load({
       }))
       var body = tab === 'model'
         ? h(ModelView, { sessionId: sessionId })
-        : tab === 'settings'
-          ? h(SettingsView, {})
-          : h(Ledger, { sessionId: sessionId })
+        : h(Ledger, { sessionId: sessionId })
       return h('div', { style: C.panel }, header, tabBar, body)
     }
 
@@ -704,6 +703,15 @@ window.__ModuleLoader__.load({
           label: function () { return '折叠' },
           inject: function (sessionId) { return { sessionId: sessionId } },
         }, FoldStatsView)
+      })
+      // 参数表单挂在原生「插件」页的组合包配置位上，而不是对话顶栏：
+      // 顶栏只放这个会话的账本与模型视角，改参数属于插件自身的一次性设置。
+      // key 是组合包名，注册只在组合包开启期间存在。
+      ctx.slots.inject('plugins.bundle.config', function () {
+        return ctx.slots.register({
+          name: 'plugins.bundle.config',
+          key: 'dsh-fold-plugin',
+        }, SettingsView)
       })
     }
 

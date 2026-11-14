@@ -90,11 +90,12 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 
 ## 顶栏「折叠」页
 
-插件自带客户端 bundle（`client/client.js`，手写 CJS，不需要构建），在会话顶栏注册一个「折叠」Tab（`conversation.view`，order 20）。页面分三个子页：
+插件自带客户端 bundle（`client/client.js`，手写 CJS，不需要构建），在会话顶栏注册一个「折叠」Tab（`conversation.view`，order 20）。页面分两个子页：
 
 - **账本**：每 5 秒拉一次同源 `GET /fold-stats?session=<会话 id>`，看 token 收支。
 - **模型视角**：拉 `GET /fold-view?session=<会话 id>`，按轮展示 `session.deriveMessages()` 派生出的真实历史——也就是折叠后模型实际收到的样子；折叠检查点展开可对照被替换掉的原文。
-- **设置**：`GET/POST /fold-config`，按字段表可视化编辑配置，保存即热生效，可一键恢复默认。
+
+参数表单不在顶栏：它挂在原生「插件」页的 dsh-fold-plugin 组合包页面里（`plugins.bundle.config`，以组合包名为 key），和装了什么插件、开没开启放在一起。那里 `GET/POST /fold-config` 按同一张字段表渲染，保存即热生效，可一键恢复默认。顶栏只放当前会话的数据，改参数属于插件的一次性设置。
 
 账本页显示：
 
@@ -107,7 +108,7 @@ node tools/render-report.mjs <会话 id> --home C:/Users/Administrator/.dsh --ou
 
 页头右侧的「逐轮报告」按钮新窗口打开 `GET /fold-report?session=<会话 id>`：服务端按当前历史现算同一份逐轮 HTML，不落盘、不用先调工具。会话已不在进程里时返回 404 并说明原因。
 
-`/fold-stats` 与 `/fold-report` 只读 `fold-store` 的记录，不需要把会话拉起来；`/fold-view` 需要会话还在进程里（它读的是派生消息）。这四个路由缺 `session` 参数返回 400，找不到会话返回 404；`/fold-config` 另接受 `POST`（`{patch}` 或 `{reset:true}`），其余路由只接受 `GET`/`HEAD`。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响。
+`/fold-stats` 与 `/fold-report` 只读 `fold-store` 的记录，不需要把会话拉起来；`/fold-view` 需要会话还在进程里（它读的是派生消息）。这四个路由缺 `session` 参数返回 400，找不到会话返回 404；`/fold-config` 另接受 `POST`（`{patch}` 或 `{reset:true}`），其余路由只接受 `GET`/`HEAD`。宿主没有 `webServer` 时这个 Tab 不会出现，折叠不受影响；宿主没有插件页（缺 `ui-plugin-manager`）时参数表单也无处渲染，`fold_config` 工具照旧可用。
 
 ## 已知限制
 
