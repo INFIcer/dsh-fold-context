@@ -203,7 +203,7 @@ test('成本提示只拿「归折叠管的部分」跟实测比，并点明两�
   assert.ok(noteFor(null).includes('要等本轮有一次模型调用'))
 })
 
-test('账单按三档单价结算成人民币', () => {
+test('成本参考：头部按 token 计，金额只作折算', () => {
   const { module } = loadClient()
   assert.equal(typeof module.__test.formatMoney, 'function')
   // 金额极小也给得出数，且不出现科学计数法。
@@ -252,16 +252,49 @@ test('账单按三档单价结算成人民币', () => {
     },
   })
   const text = JSON.stringify(section)
-  assert.ok(text.includes('账单（按单价结算）'), text.slice(0, 300))
+  // 收益与成本用 token 报；金额只在按类别拆分的参考表里出现。
+  assert.ok(text.includes('成本参考（按单价折算）'), text.slice(0, 300))
+  assert.ok(text.includes('折叠后上下文'))
+  assert.ok(text.includes('不折叠上下文'))
+  assert.ok(text.includes('净省'))
+  assert.equal(text.includes('折叠后账单'), false, '折叠后账单不再以金额为主指标')
+  assert.equal(text.includes('净省金额'), false, '逐轮表不再报净省金额')
   assert.ok(text.includes('缓存命中输入'))
   assert.ok(text.includes('输入（未命中）'))
   assert.ok(text.includes('单价（¥ / M）'))
-  assert.ok(text.includes('净省金额'))
   assert.ok(text.includes('实测账单'))
   // 命中 1000 token × ¥0.2/M = ¥0.0002
   assert.ok(text.includes('¥0.0002'), text.slice(0, 500))
   // 单价这一列是数值本身，不是金额格式
   assert.ok(text.includes('"¥0.2"'))
+})
+
+test('账本头部只用 token 报收益，不出现人民币', () => {
+  const { module } = loadClient()
+  const kpis = module.__test.ledgerKpis({
+    folds: 32,
+    savedChars: 6480502,
+    savedTokens: 1632463,
+    saveRate: 0.99,
+    recalls: 5,
+    recallTokens: 4600,
+    recalledFolds: 3,
+    pins: 1,
+    pinChars: 245,
+    pinTokens: 71,
+    netTokens: 1627792,
+  }, { tokens: 2000 })
+  assert.deepEqual(kpis.map(function (item) { return item.value }), ['+1.6M token', '−4.6k token', '−71 token', '+1.6M token'])
+  assert.equal(kpis.some(function (item) { return String(item.value).includes('¥') || String(item.hint).includes('¥') }), false)
+  assert.ok(kpis[0].hint.includes('32 段折叠'))
+  assert.ok(kpis[1].hint.includes('5 次召回'))
+})
+
+// 收益与成本都不该再拿单价折成人民币：真实请求会被缓存、压缩器和工具定义改写。
+test('客户端不再用金额描述折叠收益', () => {
+  const source = readFileSync(clientFile, 'utf8')
+  assert.equal(source.includes("折叠收益', value: '+' + formatMoney"), false)
+  assert.equal(source.includes('moneyNote'), false)
 })
 
 test('参数表单只挂在插件页，折叠 tab 不再有设置入口', () => {

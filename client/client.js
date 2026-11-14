@@ -53,11 +53,6 @@ window.__ModuleLoader__.load({
       return (n * p) / 1000000
     }
 
-    function signedMoney(value) {
-      var n = typeof value === 'number' && isFinite(value) ? value : 0
-      return (n > 0 ? '+' : '') + formatMoney(n)
-    }
-
     function moneyCell(value, color) {
       return h('td', { style: Object.assign({}, C.td, C.mono, color ? { color: color } : {}) }, formatMoney(value))
     }
@@ -225,6 +220,41 @@ window.__ModuleLoader__.load({
       return 'reply'
     }
 
+    // 账本顶部四张卡只报 token。折叠的收益没法折成人民币：同一批 token 换成高峰价就翻倍，
+    // 真实请求还会被缓存、请求期压缩器和工具定义改写，算出来的金额既不能验证也不能横向比。
+    // 所以收益与成本一律用 token 计量；金额只留在「成本参考」里，回答「这些 token 折算多少」。
+    function ledgerKpis(totals, current) {
+      var net = totals.netTokens || 0
+      var recall = totals.recallTokens || 0
+      var pin = totals.pinTokens || 0
+      return [
+        {
+          label: '折叠收益',
+          value: '+' + formatTokens(totals.savedTokens || 0) + ' token',
+          color: '#34d399',
+          hint: totals.folds + ' 段折叠，' + formatChars(totals.savedChars) + '，保留率 ' + Math.round((totals.saveRate || 0) * 100) + '%',
+        },
+        {
+          label: '召回成本',
+          value: (recall > 0 ? '−' : '') + formatTokens(recall) + ' token',
+          color: recall > 0 ? '#f87171' : 'inherit',
+          hint: totals.recalls + ' 次召回，' + totals.recalledFolds + ' 段被回看过',
+        },
+        {
+          label: '重要消息成本',
+          value: (pin > 0 ? '−' : '') + formatTokens(pin) + ' token',
+          color: pin > 0 ? '#fbbf24' : 'inherit',
+          hint: totals.pins + ' 条固化，' + formatChars(totals.pinChars || 0),
+        },
+        {
+          label: '净收益',
+          value: (net >= 0 ? '+' : '') + formatTokens(net) + ' token',
+          color: net >= 0 ? '#34d399' : '#f87171',
+          hint: '当前常驻摘要 + 重要消息约 ' + formatTokens(current ? current.tokens : 0) + ' token',
+        },
+      ]
+    }
+
     function Kpi(props) {
       return h('div', { style: C.card },
         h('div', { style: C.kpiLabel }, props.label),
@@ -241,8 +271,7 @@ window.__ModuleLoader__.load({
       var savedPct = max > 0 ? Math.min(100, (saved / max) * 100) : 0
       var costPct = max > 0 ? Math.min(100, (cost / max) * 100) : 0
       var net = saved > 0 || cost > 0 ? '净 ' + formatTokens(row.netTokens || 0) : '—'
-      var moneyNote = row.netMoney ? '，折合 ' + signedMoney(row.netMoney) : ''
-      return h('div', { style: C.barRow, title: '第 ' + row.turn + ' 轮：折叠省下 ' + formatTokens(saved) + ' token，召回与重要消息占 ' + formatTokens(cost) + ' token' + moneyNote },
+      return h('div', { style: C.barRow, title: '第 ' + row.turn + ' 轮：折叠省下 ' + formatTokens(saved) + ' token，召回与重要消息占 ' + formatTokens(cost) + ' token' },
         h('div', { style: C.turnLabel }, 'T' + row.turn),
         h('div', { style: Object.assign({}, C.barArea, { justifyContent: 'flex-end' }) },
           h('div', { style: Object.assign({}, C.barTrack, { width: costPct + '%' }) },
@@ -349,11 +378,13 @@ window.__ModuleLoader__.load({
       }
       var savedMoney = unfoldedMoney - foldedMoney
       var saved = totals.netSavedTokens || 0
+      // 头部四张卡用 token：这份历史现在多大、折叠省了多少，都是 token 的事。
+      // 金额只回答「这批 token 按当前单价折算是多少」，放在下面的表里当参考。
       var kpis = h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' } },
-        h(Kpi, { label: '折叠后账单', value: formatMoney(foldedMoney), color: '#34d399', hint: formatTokens(totals.foldedTokens) + ' token；按当前历史重放 ' + (totals.turns || 0) + ' 轮 / ' + (totals.steps || 0) + ' 步请求' }),
-        h(Kpi, { label: '不折叠账单', value: formatMoney(unfoldedMoney), color: '#f87171', hint: formatTokens(totals.unfoldedTokens) + ' token；原文一直留在上下文里' }),
-        h(Kpi, { label: '净省', value: signedMoney(savedMoney), color: savedMoney >= 0 ? '#34d399' : '#f87171', hint: (saved >= 0 ? '+' : '') + formatTokens(saved) + ' token；省 ' + percent(totals.savedRate || 0) }),
-        h(Kpi, { label: '实测最近一次', value: latest ? formatMoney(totals.latestMoney || 0) : '—', color: '#60a5fa', hint: latest ? formatTokens(latest.promptTokens) + ' token；有回报的 ' + (totals.actualTurns || 0) + ' 轮累计 ' + formatMoney(totals.actualMoney || 0) : '本进程还没有拿到 provider 回报' })
+        h(Kpi, { label: '折叠后上下文', value: formatTokens(totals.foldedTokens || 0) + ' token', color: '#34d399', hint: '按当前历史重放 ' + (totals.turns || 0) + ' 轮 / ' + (totals.steps || 0) + ' 步请求' }),
+        h(Kpi, { label: '不折叠上下文', value: formatTokens(totals.unfoldedTokens || 0) + ' token', color: '#f87171', hint: '原文一直留在上下文里' }),
+        h(Kpi, { label: '净省', value: (saved >= 0 ? '+' : '') + formatTokens(saved) + ' token', color: saved >= 0 ? '#34d399' : '#f87171', hint: '省 ' + percent(totals.savedRate || 0) }),
+        h(Kpi, { label: '实测最近一次请求', value: latest ? formatMoney(totals.latestMoney || 0) : '—', color: '#60a5fa', hint: latest ? '真实账单；' + formatTokens(latest.promptTokens) + ' token，有回报的 ' + (totals.actualTurns || 0) + ' 轮累计 ' + formatMoney(totals.actualMoney || 0) : '本进程还没有拿到 provider 回报' })
       )
       function headCells(titles) {
         return h('tr', {}, titles.map(function (title) {
@@ -419,17 +450,15 @@ window.__ModuleLoader__.load({
         ? h('div', { style: C.notice }, '还没有可估算的轮次。')
         : h('div', { style: { maxHeight: '280px', overflowY: 'auto' } },
             h('table', { style: C.table },
-              h('thead', {}, headCells(['轮', '步', '折叠后', '不折叠', '净省 token', '净省金额', '实际输入'])),
+              h('thead', {}, headCells(['轮', '步', '折叠后', '不折叠', '净省 token', '实际输入'])),
               h('tbody', {}, rows.map(function (row) {
                 var rowSaved = row.netSavedTokens || 0
-                var rowMoney = row.netSavedMoney || 0
                 return h('tr', { key: 'c' + row.turn },
                   h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.turn === null ? '?' : row.turn)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.steps || 1)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, formatTokens(row.foldedTokens)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, formatTokens(row.unfoldedTokens)),
                   h('td', { style: Object.assign({}, C.td, C.mono, { color: rowSaved >= 0 ? '#34d399' : '#f87171' }) }, (rowSaved >= 0 ? '+' : '') + formatTokens(rowSaved)),
-                  h('td', { style: Object.assign({}, C.td, C.mono, { color: rowMoney >= 0 ? '#34d399' : '#f87171' }) }, signedMoney(rowMoney)),
                   h('td', { style: Object.assign({}, C.td, C.mono, { opacity: row.actualPromptTokens ? 1 : 0.4 }) }, row.actualPromptTokens ? formatTokens(row.actualPromptTokens) : '—')
                 )
               }))
@@ -437,10 +466,11 @@ window.__ModuleLoader__.load({
           )
       return h('div', { style: C.section },
         h('div', { style: C.sectionHead },
-          h('div', { style: C.sectionTitle }, '账单（按单价结算）'),
-          h('div', { style: C.sub }, priceLine(prices))
+          h('div', { style: C.sectionTitle }, '成本参考（按单价折算）'),
+          h('div', { style: C.sub }, priceLine(prices) + ' · 折叠收益以 token 计，金额只是同一批 token 的折算参考')
         ),
         kpis,
+        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '金额不是收益：同一批 token 换成高峰价就翻倍，真实请求还会被缓存与请求期压缩器改写。这里只回答「这些 token 按当前单价折算是多少」；「实测」那一栏才是 provider 回报的真实计费。'),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, calibrationNote(cost)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, costDriftNote(cost.drift)),
         h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。检查点按未命中计，命中从上一个切点算起。'),
@@ -539,12 +569,10 @@ window.__ModuleLoader__.load({
           h('div', { style: C.notice }, payload.status === 'loading' ? '正在读取统计…' : '还没有数据。'))
       }
 
-      // 金额是主指标，token 退到提示里：账本的量都能按输入均价结算成人民币。
       var kpis = h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px' } },
-        h(Kpi, { label: '折叠收益', value: '+' + formatMoney(totals.savedMoney || 0), color: '#34d399', hint: '省下 ' + formatTokens(totals.savedTokens) + ' token（' + totals.folds + ' 段折叠，' + formatChars(totals.savedChars) + '，保留率 ' + Math.round((totals.saveRate || 0) * 100) + '%）' }),
-        h(Kpi, { label: '召回成本', value: formatMoney(-(totals.recallMoney || 0)), color: totals.recallTokens > 0 ? '#f87171' : 'inherit', hint: totals.recalls + ' 次召回，' + formatTokens(totals.recallTokens) + ' token，' + totals.recalledFolds + ' 段被回看过' }),
-        h(Kpi, { label: '重要消息成本', value: formatMoney(-(totals.pinMoney || 0)), color: totals.pinTokens > 0 ? '#fbbf24' : 'inherit', hint: totals.pins + ' 条固化，' + formatChars(totals.pinChars) + '，' + formatTokens(totals.pinTokens) + ' token' }),
-        h(Kpi, { label: '净收益', value: signedMoney(totals.netMoney || 0), color: (totals.netMoney || 0) >= 0 ? '#34d399' : '#f87171', hint: (totals.netTokens >= 0 ? '+' : '') + formatTokens(totals.netTokens) + ' token；当前常驻摘要 + 重要消息约 ' + formatTokens(data.current ? data.current.tokens : 0) + ' token' })
+        ledgerKpis(totals, data.current).map(function (item) {
+          return h(Kpi, { key: item.label, label: item.label, value: item.value, color: item.color, hint: item.hint })
+        })
       )
 
       var compositionBody = compositionState[0].data
@@ -1445,6 +1473,7 @@ window.__ModuleLoader__.load({
       costDriftNote: costDriftNote,
       calibrationNote: calibrationNote,
       CostSection: CostSection,
+      ledgerKpis: ledgerKpis,
       formatMoney: formatMoney,
     }
     return module.exports
