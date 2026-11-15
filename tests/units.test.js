@@ -29,7 +29,7 @@ import {
 } from '../lib/recall.js'
 import { recallReminder, registerTools } from '../lib/tools.js'
 import { TurnTracker } from '../lib/turn-tracker.js'
-import { FakeSession, assistantNode, eventOf, makeCtx, toolNode, userNode } from './fakes.js'
+import { FakeSession, assistantNode, developerNode, eventOf, makeCtx, toolNode, userNode } from './fakes.js'
 
 const silent = { info() {}, warn() {}, error() {} }
 
@@ -125,7 +125,7 @@ test('长 markdown 回复按标题摘要，短回复仍整段保留', () => {
   assert.ok(!whole.text.includes('按标题摘要'), whole.text)
 })
 
-test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
+test('isKeeper 保留一切注入与开发者消息，只折叠助手段', () => {
   assert.equal(isKeeper(userNode(1, 'hi', 'user')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-pin')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-checkpoint')), true)
@@ -133,8 +133,19 @@ test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
   assert.equal(isKeeper(userNode(1, 'hi', 'compact-checkpoint')), true)
   // 调度器投递的是用户指令：折掉等于吞掉用户要求，所以和用户原话一样保留。
   assert.equal(isKeeper(userNode(1, 'hi', 'schedule')), true)
-  // 运行时注入是上下文，下一轮会重新注入最新的一份。
-  assert.equal(isKeeper(userNode(1, 'hi', 'runtime-context')), false)
+  // 一次性注入：宿主不会在下一轮补回来，折掉就永久失去。
+  assert.equal(isKeeper(userNode(1, '审批策略变了', 'user-approval')), true)
+  assert.equal(isKeeper(userNode(1, '子代理完成', 'subagent-settled')), true)
+  assert.equal(isKeeper(userNode(1, '模型切换了', 'model-selection', 'notice')), true)
+  // 会重放的注入同样保留：折叠把它移出 surface 后，宿主当作没发过再发一份，
+  // 折掉省多少就补回多少；技能目录重发的还是完整目录。
+  assert.equal(isKeeper(userNode(1, 'hi', 'runtime-context', 'snapshot')), true)
+  assert.equal(isKeeper(userNode(1, '时间上下文', 'time-context', 'snapshot')), true)
+  assert.equal(isKeeper(userNode(1, '技能目录', 'skill-catalog', 'catalog')), true)
+  // 工具注册表变化也是一次性通知。
+  assert.equal(isKeeper(developerNode(1, '工具变了')), true)
+  assert.equal(isKeeper({ type: 'assistant/message', seq: 1, data: { message: {} } }), false)
+  assert.equal(isKeeper({ type: 'tool/result', seq: 2, data: { message: {} } }), false)
 })
 
 test('planSegments 在用户消息处断开，片段从第一条非 keeper 消息开始', () => {
@@ -163,21 +174,44 @@ test('planSegments 丢掉没走完的那一步，不把调用和结果切开', (
   assert.deepEqual(segments[0].map((n) => n.seq), [1, 2])
 })
 
-test('每轮开头的运行时注入自己开一个片段，不再永久留在上下文里', () => {
+test('可重放注入也是 keeper：折掉只会在下一步重发一份', () => {
   const nodes = [
-    userNode(1, '这次会话的上下文', 'runtime-context'),
+    userNode(1, '这次会话的上下文', 'runtime-context', 'snapshot'),
     assistantNode(2, { text: 'a' }),
     toolNode(3, 'c1', '结果'),
   ]
   const segments = planSegments(nodes)
   assert.equal(segments.length, 1)
-  assert.deepEqual(segments[0].map((n) => n.seq), [1, 2, 3])
+  assert.deepEqual(segments[0].map((n) => n.seq), [2, 3])
 })
 
 test('调度指令是 keeper，不进入折叠片段', () => {
   const nodes = [userNode(1, '重启完成', 'schedule'), assistantNode(2, { text: 'a' })]
   const segments = planSegments(nodes)
   assert.deepEqual(segments[0].map((n) => n.seq), [2])
+})
+
+test('一次性上下文注入与开发者消息也是 keeper，不进入折叠片段', () => {
+  const nodes = [
+    assistantNode(1, { text: 'a' }),
+    userNode(2, '审批策略变了', 'user-approval'),
+    assistantNode(3, { text: 'b' }),
+    developerNode(4, '工具变更'),
+    assistantNode(5, { text: 'c' }),
+  ]
+  const segments = planSegments(nodes)
+  assert.deepEqual(segments.map((segment) => segment.map((n) => n.seq)), [[1], [3], [5]])
+})
+
+test('技能目录与时间上下文留在原处，不进入折叠片段', () => {
+  const nodes = [
+    userNode(1, '技能目录', 'skill-catalog', 'catalog'),
+    assistantNode(2, { text: 'a' }),
+    userNode(3, '时间上下文', 'time-context', 'snapshot'),
+    assistantNode(4, { text: 'b' }),
+  ]
+  const segments = planSegments(nodes)
+  assert.deepEqual(segments.map((segment) => segment.map((n) => n.seq)), [[2], [4]])
 })
 
 test('system/message 在片段之间断开，不会被替换区间扫掉', () => {
@@ -189,17 +223,15 @@ test('system/message 在片段之间断开，不会被替换区间扫掉', () =>
   assert.deepEqual(segments[1].map((n) => n.seq), [3])
 })
 
-test('runtime-context 注入跟着片段一起折叠，fold-pin 则切断片段', () => {
+test('fold-pin 切断片段，前面的内容仍可整段折叠', () => {
   const nodes = [
     assistantNode(1, { text: 'a' }),
-    userNode(2, '注入的上下文', 'runtime-context'),
-    assistantNode(3, { text: 'b' }),
-    userNode(4, '重要结论', 'fold-pin'),
-    assistantNode(5, { text: 'c' }),
+    assistantNode(2, { text: 'b' }),
+    userNode(3, '重要结论', 'fold-pin'),
+    assistantNode(4, { text: 'c' }),
   ]
   const segments = planSegments(nodes)
-  assert.deepEqual(segments[0].map((n) => n.seq), [1, 2, 3])
-  assert.deepEqual(segments[1].map((n) => n.seq), [5])
+  assert.deepEqual(segments.map((segment) => segment.map((n) => n.seq)), [[1, 2], [4]])
 })
 
 test('foldTurn 折叠够长的一轮，并留下可召回的载荷', () => {
@@ -373,16 +405,17 @@ test('重要消息按 label 去重：保留最新内容，不重复计数', () =
   assert.equal(pins[1].id, '另一条')
 })
 
-test('注入消息撑满预算时，载荷仍然保住最终回复', () => {
+test('调用参数不计入体量，载荷仍然完整覆盖到最终回复', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
   const session = new FakeSession('sess-c')
   const nodes = [userNode(1, '帮我查一下', 'user')]
   let seq = 2
-  // 20 步：每步有思考、工具结果，再加一条 3 千字的运行时注入。
+  // 20 步：每步有思考与工具结果，调用参数里再带 3 千字代码（参数不计入 chars）。
   for (let i = 0; i < 20; i += 1) {
-    nodes.push(userNode(seq, '注入'.repeat(1500), 'runtime-context'))
-    seq += 1
-    nodes.push(assistantNode(seq, { reasoning: '想'.repeat(400), calls: [{ id: 'c' + i, name: 'run_code' }] }))
+    nodes.push(assistantNode(seq, {
+      reasoning: '想'.repeat(400),
+      calls: [{ id: 'c' + i, name: 'run_code', args: { code: 'x'.repeat(3000) } }],
+    }))
     seq += 1
     nodes.push(toolNode(seq, 'c' + i, '果'.repeat(600)))
     seq += 1
@@ -396,13 +429,13 @@ test('注入消息撑满预算时，载荷仍然保住最终回复', () => {
     session,
     turn: 1,
     nodes,
-    config: normalizeConfig({ minFoldTokens: 300 }),
+    config: normalizeConfig({}),
     store,
     log: silent,
   })
   assert.deepEqual(result.ids, ['f1'])
   const record = store.findFold('f1')
-  // 注入消息与调用参数不计入 chars，载荷必须完整覆盖整段，所以载荷比 chars 长。
+  // 调用参数不计入 chars，载荷必须完整覆盖整段，所以载荷比 chars 长。
   assert.ok(record.chars < record.items.reduce((sum, item) => sum + item.text.length, 0))
   assert.ok(record.items.some((item) => item.text.includes('[回复] 本轮结论')))
   assert.equal(record.items.at(-1).seq, last.seq)

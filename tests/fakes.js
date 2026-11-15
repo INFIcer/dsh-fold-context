@@ -104,15 +104,30 @@ export function makeCtx() {
   }
 }
 
-export function userNode(seq, text, kind = 'user') {
+export function userNode(seq, text, kind = 'user', form) {
   return {
     type: 'user/message',
     seq,
     data: {
       id: 'm' + seq,
       role: 'user',
-      source: { kind },
+      source: form === undefined ? { kind } : { kind, form },
       content: [{ type: 'text', text }],
+    },
+  }
+}
+
+export function developerNode(seq, text, kind = 'tool-registry') {
+  return {
+    type: 'developer/message',
+    seq,
+    data: {
+      message: {
+        id: 'm' + seq,
+        role: 'developer',
+        source: { kind },
+        content: [{ type: 'text', text }],
+      },
     },
   }
 }
