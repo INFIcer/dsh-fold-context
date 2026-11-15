@@ -61,6 +61,30 @@ test('stats 路由返回该会话的账本 JSON', () => {
   assert.equal(body.config.maxRecallTokens, 900)
 })
 
+test('stats 路由按上下文里的 pin 计价，不按载荷记录', () => {
+  const records = [
+    { kind: 'fold', id: 'f1', turn: 1, at: 1, chars: 400, note: 'b'.repeat(40), items: [{ seq: 1, text: 'a'.repeat(400) }] },
+    { kind: 'pin', id: 'P', turn: 1, at: 2, text: 'cccc' },
+  ]
+  const surface = [
+    { label: 'P', text: '【重要·永不折叠】 P\ncccc' },
+    { label: '遗留', text: '【重要·永不折叠】 遗留\n' + 'z'.repeat(120) },
+  ]
+  const handler = createStatsHandler({
+    makeStore: () => makeStore(records),
+    getConfig: () => ({}),
+    log: quietLog,
+    getSurfacePins: () => surface,
+  })
+  const res = fakeRes()
+  handler(fakeReq('/fold-stats?session=s1'), res)
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.ok, true)
+  // 记录只有 1 条，上下文里有 2 条：账本报 2 条，并把没记录的那条标出来。
+  assert.equal(body.totals.pins, 2)
+  assert.equal(body.totals.pinsUnrecorded, 1)
+})
+
 test('缺 session 参数时 400 且说明用法', () => {
   const handler = createStatsHandler({ makeStore: () => makeStore([]), getConfig: () => ({}), log: quietLog })
   const res = fakeRes()

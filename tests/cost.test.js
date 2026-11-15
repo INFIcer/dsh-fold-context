@@ -425,6 +425,21 @@ test('分段目录与关键词检索也是插件额外首次上行，从折叠�
   assert.equal(row.unfoldedInputTokens, row.foldedInputTokens - row.pluginOverheadTokens)
 })
 
+test('重要消息的额外开销只算看得见的那几条，字数按整条消息', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 2, chars: 1200, checkpointChars: 200, unfoldedChars: 40000 }),
+    turn({ turn: 2, steps: 2, chars: 800, checkpointChars: 200, unfoldedChars: 30000 }),
+  ]
+  const pins = [
+    { kind: 'pin', id: 'P1', text: 'aaa', chars: 400, present: true },
+    // 被官方压缩卷走的那条：模型从某个时点起就看不到它了，不能再算一次首次上行。
+    { kind: 'pin', id: 'P2', text: 'bbb', chars: 9000, present: false },
+  ]
+  const cost = buildCost({ groups, folds: [], recalls: [], pins, config: { cacheHitRate: 1 } })
+  assert.equal(cost.totals.pluginOverhead.pin, estimateChars(400))
+})
+
 test('上一轮检查点与目录分开报，都不漏进额外开销', () => {
   const groups = [
     { kind: 'system', chars: 4000 },

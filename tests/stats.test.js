@@ -154,23 +154,97 @@ test('重要消息在轮末注入：同轮不计半步，后续轮次按命中�
   assert.equal(row.pinMoney, roundMoney((tokens * 1 + tokens * 2 * 0.02) / 1e6))
 })
 
-test('buildStats 标记被压缩卷走的 pin，并从当前常驻里扣掉', () => {
+test('buildStats 把被压缩卷走的 pin 从成本里扣掉，而不是只标一下', () => {
   const records = [
     fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40)),
     { kind: 'pin', id: 'P1', turn: 1, at: 2001, text: 'still here' },
     { kind: 'pin', id: 'P2', turn: 1, at: 2002, text: 'swallowed' },
   ]
   const stats = buildStats({ records, config: {}, presentPins: new Set(['P1']) })
-  assert.equal(stats.totals.pins, 2)
+  assert.equal(stats.totals.pins, 1)
   assert.equal(stats.totals.pinsPresent, 1)
   assert.equal(stats.totals.pinsLost, 1)
   const lost = stats.pins.find((row) => row.id === 'P2')
   assert.equal(lost.present, false)
   const kept = stats.pins.find((row) => row.id === 'P1')
   assert.equal(kept.present, true)
-  // 常驻只算还看得见的 pin：否则账本会继续给模型看不到的内容计费。
+  // 常驻与成本都只算还看得见的 pin：否则账本会继续给模型看不到的内容计费。
   assert.equal(stats.current.pinChars, kept.chars)
   assert.equal(stats.current.pinTokens, kept.tokens)
+  assert.equal(stats.totals.pinChars, kept.chars)
+  assert.equal(stats.totals.pinTokens, kept.tokens)
+  // 卷走的那批只报体积，不进成本、也不再按「之后每轮重发」算钱。
+  assert.equal(lost.pinMoney, 0)
+  assert.equal(lost.requests, 0)
+  assert.equal(stats.totals.pinLostChars, lost.chars)
+  assert.equal(stats.totals.pinLostTokens, lost.tokens)
+})
+
+test('重复记录的 pin 不算丢了一条：pinsDuplicate 单列，成本不变', () => {
+  const records = [
+    fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40)),
+    { kind: 'pin', id: 'P1', turn: 1, at: 2001, text: 'dup' },
+    { kind: 'pin', id: 'P1', turn: 2, at: 2002, text: 'dup' },
+  ]
+  const stats = buildStats({
+    records,
+    config: {},
+    presentPins: [{ label: 'P1', text: pinPrefix + ' P1\ndup' }],
+  })
+  const full = pinPrefix + ' P1\ndup'
+  assert.equal(stats.totals.pins, 1)
+  assert.equal(stats.totals.pinsDuplicate, 1)
+  assert.equal(stats.totals.pinsLost, 0)
+  assert.equal(stats.totals.pinDuplicateChars, full.length)
+  assert.equal(stats.totals.pinLostChars, 0)
+  assert.equal(stats.totals.pinChars, full.length)
+  assert.equal(stats.pins.filter((row) => row.duplicate === true).length, 1)
+})
+
+test('旧版本记录被取代：pinsSuperseded 单列，不报成被卷走', () => {
+  const records = [
+    fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40)),
+    { kind: 'pin', id: 'P1', turn: 1, at: 2001, text: 'old' },
+    { kind: 'pin', id: 'P1', turn: 2, at: 2002, text: 'new' },
+  ]
+  const stats = buildStats({
+    records,
+    config: {},
+    presentPins: [{ label: 'P1', text: pinPrefix + ' P1\nnew' }],
+  })
+  const full = pinPrefix + ' P1\nnew'
+  // 上下文里只有 new 那条：旧记录既不是「丢了一条」，也不是被压缩卷走。
+  assert.equal(stats.totals.pins, 1)
+  assert.equal(stats.totals.pinsSuperseded, 1)
+  assert.equal(stats.totals.pinsDuplicate, 0)
+  assert.equal(stats.totals.pinsLost, 0)
+  assert.equal(stats.totals.pinLostChars, 0)
+  assert.equal(stats.totals.pinSupersededChars, pinPrefix.length + ' P1\n'.length + 'old'.length)
+  assert.equal(stats.totals.pinChars, full.length)
+  const live = stats.pins.find((row) => row.present === true)
+  assert.equal(live.text, 'new')
+})
+
+test('账本按模型看得见的那几条 pin 计价，而不是按载荷记录', () => {
+  const records = [
+    fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40), { usage: { steps: 2 } }),
+    { kind: 'pin', id: 'P1', turn: 1, at: 2001, text: 'recorded' },
+  ]
+  // 上下文里有两条：一条对得上记录，另一条是载荷里已经查不到的（历史遗留）。
+  const legacyText = pinPrefix + ' 历史遗留\n' + 'z'.repeat(300)
+  const surface = [
+    { label: 'P1', text: pinPrefix + ' P1\nrecorded' },
+    { label: '历史遗留', text: legacyText },
+  ]
+  const stats = buildStats({ records, config: {}, presentPins: surface })
+  assert.equal(stats.totals.pins, 2)
+  assert.equal(stats.totals.pinsUnrecorded, 1)
+  const legacy = stats.pins.find((row) => row.id === '历史遗留')
+  assert.equal(legacy.recorded, false)
+  assert.equal(legacy.present, true)
+  // 字数直接取自上下文里的那条消息，不是按载荷记录倒推。
+  assert.equal(legacy.chars, legacyText.length)
+  assert.equal(stats.totals.pinChars, legacyText.length + (pinPrefix + ' P1\nrecorded').length)
 })
 
 test('没有 provider 回报时按平均步数补，并标记估算', () => {
