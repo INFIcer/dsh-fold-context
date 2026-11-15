@@ -364,19 +364,26 @@ test('折叠原文面板与召回同形：整段/目录两种形态与目录行�
   assert.equal(parts[3].no, 4)
   assert.equal(parts[1].kind, 'call')
 
-  const small = t.recallPlan(record, { recallDirectTokens: 2000 })
+  // 小记录：目录比原文还长，整段返回。
+  const small = t.recallPlan(record)
   assert.equal(small.direct, true)
-  const big = t.recallPlan(record, { recallDirectTokens: 10 })
-  assert.equal(big.direct, false)
-  assert.ok(big.tokens > 10)
+
+  // 大记录才轮到目录；每行在预览与原文间二选一，预览长度由 previewChars 决定。
+  const longRecord = { items: Array.from({ length: 10 }, function (_, i) { return { seq: i + 1, blocks: [{ kind: 'think', text: '[思考] ' + '思'.repeat(400) }] } }) }
+  const longPlan = t.recallPlan(longRecord)
+  assert.equal(longPlan.direct, false)
+  const longLines = t.recallIndexLines(longPlan.parts, longPlan.previewChars)
+  assert.ok(longLines[0].includes('…'), longLines[0])
+  assert.ok(longLines[0].length < 400 * 0.5, '预览不该被比例截短：' + longLines[0].length)
 
   const lines = t.recallIndexLines(parts, 10)
   assert.ok(lines[0].startsWith('#1 [思考] '))
   // 目录行同时给字数与 token：字数在 formatCharsTokens 里带「字」，token 以（≈N token）结尾。
   assert.ok(lines[0].includes('字（≈'))
-  assert.ok(lines[0].includes(' token）：'))
+  assert.ok(lines[0].includes('…'), '长段给截断预览：' + lines[0])
+  // 短段（{}）截成预览并不更短：这一行直接给原文。
   assert.ok(lines[1].startsWith('#2 [调用 read] '))
-  assert.ok(lines[0].length < 60)
+  assert.ok(lines[1].endsWith('：{}'), '短段直接给原文：' + lines[1])
 })
 
 test('客户端分段与召回同规则：长 markdown 回复按标题切段', () => {

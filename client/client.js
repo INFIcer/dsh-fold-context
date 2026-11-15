@@ -835,21 +835,27 @@ window.__ModuleLoader__.load({
 
     function recallIndexLines(parts, previewChars) {
       return parts.map(function (part) {
+        var meta = '#' + part.no + ' [' + recallKindLabel(part) + '] ' + formatCharsTokens(part.chars)
         var flat = part.text.replace(/^\[[^\]]*\]\s*/, '').replace(/\s+/g, ' ').trim()
-        var cut = flat.length <= previewChars ? flat : flat.slice(0, Math.max(0, previewChars)) + '…'
-        return '#' + part.no + ' [' + recallKindLabel(part) + '] ' + formatCharsTokens(part.chars) + '：' + (cut || '（空）')
+        if (!flat) return meta
+        // 与 lib/recall.js 同规则：预览比原文短才用预览，否则整行给原文。
+        var preview = flat.length <= previewChars ? flat : flat.slice(0, Math.max(0, previewChars)) + '…'
+        return meta + '：' + (preview.length < flat.length ? preview : flat)
       })
     }
 
     function recallPlan(record, config) {
       var settings = config || {}
-      var directTokens = typeof settings.recallDirectTokens === 'number' && settings.recallDirectTokens > 0 ? settings.recallDirectTokens : 500
       var previewTokens = typeof settings.recallIndexPreviewTokens === 'number' && settings.recallIndexPreviewTokens > 0 ? settings.recallIndexPreviewTokens : 25
       var maxRecallTokens = typeof settings.maxRecallTokens === 'number' && settings.maxRecallTokens > 0 ? settings.maxRecallTokens : 1000
+      var minRatio = typeof settings.minFoldRatio === 'number' && settings.minFoldRatio > 0 ? settings.minFoldRatio : 0.5
       var parts = foldPartsOf(record, { replySplitChars: maxRecallTokens * 4 })
       var chars = parts.reduce(function (sum, part) { return sum + part.chars }, 0)
       var tokens = Math.round(chars / 4)
-      return { parts: parts, chars: chars, tokens: tokens, direct: tokens <= directTokens, directLimit: directTokens, previewChars: previewTokens * 4 }
+      // 与服务端同口径：每行在预览/原文间二选一；目录整体省不到原文的 minRatio 倍时整段返回。头部与合计按约 200 字估。
+      var indexChars = recallIndexLines(parts, previewTokens * 4).reduce(function (sum, line) { return sum + line.length + 1 }, 0) + 200
+      var direct = indexChars >= chars * minRatio
+      return { parts: parts, chars: chars, tokens: tokens, direct: direct, previewChars: previewTokens * 4 }
     }
 
     var RECALL_LINE_STYLE = {

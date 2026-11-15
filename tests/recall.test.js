@@ -40,7 +40,16 @@ test('foldParts 按行首前缀拆段，段号连续且 chars 不算前缀', () 
 })
 
 test('buildFoldIndex 给出目录、段号、类型与预览', () => {
-  const index = buildFoldIndex(record(), { previewChars: 20 })
+  // 预览也要按比例来：第一段够长（约 160 字），才放得下 20 字预览。
+  const longRecord = record({
+    items: [
+      { seq: 11, text: '[思考] 先看目录' + '再看配置'.repeat(40) },
+      { seq: 12, text: '[回复] 开始搬' },
+      { seq: 13, text: '[调用 run_code] {"code":"1"}' },
+      { seq: 14, text: '[工具结果] 完成' },
+    ],
+  })
+  const index = buildFoldIndex(longRecord, { previewChars: 20 })
   assert.match(index, /折叠 f1（第 2 轮/)
   assert.match(index, /共 4 段/)
   assert.match(index, /#1 \[思考\]/)
@@ -61,6 +70,26 @@ test('buildFoldIndex 超预算时按行截断并说明剩余段号', () => {
   assert.ok(index.length <= 400)
   assert.match(index, /目录已截断/)
   assert.match(index, /还有 \d+ 段没列出来/)
+})
+
+test('目录每行在摘要与原文间只比长短，不压缩预览长度', () => {
+  // 9 字的段截成预览也省不到一半：直接给原文。
+  const tiny = buildFoldIndex(record(), { previewChars: 100 })
+  const tinyLine = tiny.split('\n').find((line) => line.startsWith('#1 '))
+  assert.ok(tinyLine.includes('先看目录'), tinyLine)
+  assert.equal(tinyLine.includes('…'), false)
+
+  // 400 字的段：预览由 recallIndexPreviewTokens 截断，够短才用预览。
+  const big = { kind: 'fold', id: 'f9', turn: 1, items: [{ seq: 1, text: '[思考] ' + 'x'.repeat(400) }] }
+  const previewLine = buildFoldIndex(big, { previewChars: 100 }).split('\n').find((line) => line.startsWith('#1 '))
+  assert.ok(previewLine.endsWith('…'), previewLine)
+  // 预览长度由 previewChars 决定，不被比例再截成原文的一半。
+  assert.ok(previewLine.length < 200, '预览不该被比例截短：' + previewLine.length)
+
+  // 预览上限比原文还大时预览并不更省：该行直接给原文。
+  const fullLine = buildFoldIndex(big, { previewChars: 1000 }).split('\n').find((line) => line.startsWith('#1 '))
+  assert.equal(fullLine.includes('…'), false)
+  assert.ok(fullLine.includes('x'.repeat(400)), '原文整段给出')
 })
 
 test('normalizePartSelectors 接受数组与逗号/空白分隔字符串', () => {

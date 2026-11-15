@@ -6,7 +6,7 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { buildNote, buildNoteEx, filesOfToolCall, isKeeper, noteFilesLine, recallItems, shortPath, statsOf, totalChars } from '../lib/fold-text.js'
+import { buildNote, buildNoteEx, estimateNoteChars, filesOfToolCall, isKeeper, isWorthFolding, noteFilesLine, recallItems, shortPath, statsOf, totalChars } from '../lib/fold-text.js'
 import { planSegments } from '../lib/plan.js'
 import { foldTurn, publishPin } from '../lib/commit.js'
 import { FoldStore, safeFileName } from '../lib/store.js'
@@ -244,7 +244,7 @@ test('foldTurn 折叠够长的一轮，并留下可召回的载荷', () => {
   ]
   session.seed(nodes)
   const store = new FoldStore({ homeDir, sessionId: session.id })
-  const config = normalizeConfig({ minFoldTokens: 300 })
+  const config = normalizeConfig({})
 
   const result = foldTurn({
     session,
@@ -279,12 +279,89 @@ test('foldTurn 对短回合与关闭开关都不动手', () => {
   session.seed(nodes)
   const store = new FoldStore({ homeDir, sessionId: session.id })
 
-  const short = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({ minFoldTokens: 300 }), store, log: silent })
+  const short = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({}), store, log: silent })
   assert.equal(short.folded, 0)
 
   const off = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({ enabled: false }), store, log: silent })
   assert.equal(off.folded, 0)
   assert.equal(session.events.length, 0)
+})
+
+test('foldTurn 按 minFoldRatio 保留不划算的原文，调低阈值后才折', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  // 原文 2000 字、回复预览被截成约 1200 字：摘要 / 原文约 0.62，默认阈值 0.5 不折。
+  const build = (sessionId) => {
+    const session = new FakeSession(sessionId)
+    const nodes = [userNode(1, '说点长的', 'user'), assistantNode(2, { text: '长'.repeat(2000) })]
+    session.seed(nodes)
+    return { session, nodes }
+  }
+
+  const kept = build('sess-ratio-keep')
+  const keptResult = foldTurn({
+    session: kept.session,
+    turn: 1,
+    nodes: kept.nodes,
+    config: normalizeConfig({}),
+    store: new FoldStore({ homeDir, sessionId: kept.session.id }),
+    log: silent,
+  })
+  assert.equal(keptResult.folded, 0, '省不到一半就保留原文')
+  assert.equal(kept.session.events.length, 0)
+
+  const folded = build('sess-ratio-fold')
+  const foldedResult = foldTurn({
+    session: folded.session,
+    turn: 1,
+    nodes: folded.nodes,
+    config: normalizeConfig({ minFoldRatio: 0.9 }),
+    store: new FoldStore({ homeDir, sessionId: folded.session.id }),
+    log: silent,
+  })
+  assert.equal(foldedResult.folded, 1, '阈值调高后同一轮就会折')
+})
+
+test('isWorthFolding 严格低于阈值才折', () => {
+  assert.equal(isWorthFolding(499, 1000, 0.5), true)
+  assert.equal(isWorthFolding(500, 1000, 0.5), false, '等于阈值保留原文')
+  assert.equal(isWorthFolding(501, 1000, 0.5), false)
+  assert.equal(isWorthFolding(899, 1000, 0.9), true)
+  assert.equal(isWorthFolding(0, 0, 0.5), false, '原文为空不折')
+  assert.equal(isWorthFolding(400, 1000), true, '省略比例时用默认 0.5')
+})
+
+test('estimateNoteChars 与实际长度一致：标题摘要按实际标题算，不按 maxNoteTokens 预留', () => {
+  const toolOnly = statsOf([
+    assistantNode(2, { reasoning: 'x'.repeat(300), calls: [{ id: 'c1', name: 'grep' }] }),
+    toolNode(3, 'c1', 'y'.repeat(200)),
+  ])
+  const opts = { foldId: 'f3', turn: 3, stats: toolOnly, maxTokens: 300, toolName: 'fold_recall' }
+  assert.equal(estimateNoteChars(opts), buildNoteEx(opts).text.length)
+
+  const outlineStats = statsOf([
+    assistantNode(2, {
+      text: '# 甲\n' + '正文'.repeat(800) + '\n## 乙\n' + '正文'.repeat(800) + '\n## 丙\n' + '正文'.repeat(800),
+    }),
+  ])
+  const outlineOpts = { foldId: 'f4', turn: 4, stats: outlineStats, maxTokens: 50, toolName: 'fold_recall' }
+  const note = buildNoteEx(outlineOpts)
+  assert.equal(estimateNoteChars(outlineOpts), note.text.length)
+
+  // 标题连起来不比原文短（标题多、正文少）：保留原文，长度仍然精确。
+  const headingOnly = statsOf([
+    assistantNode(2, { text: Array.from({ length: 20 }, (_, index) => '# t' + index).join('\n') }),
+  ])
+  const headingOpts = { foldId: 'f5', turn: 5, stats: headingOnly, maxTokens: 10, toolName: 'fold_recall' }
+  const headingNote = buildNoteEx(headingOpts)
+  assert.equal(estimateNoteChars(headingOpts), headingNote.text.length)
+  assert.equal(headingNote.text.includes('按标题摘要'), false, headingNote.text)
+  assert.ok(headingNote.text.includes('# t19'), '标题摘要不更短时保留原文：' + headingNote.text)
+})
+
+test('系统提示词用配置值渲染 minFoldRatio', () => {
+  const text = systemPromptText({ minFoldRatio: 0.35 })
+  assert.ok(text.includes('0.35'), text)
+  assert.ok(!text.includes('{{minFoldRatio}}'), text)
 })
 
 test('TurnTracker 累加每步 provider 回报，snapshot 一并交出并清空', () => {
@@ -448,8 +525,8 @@ test('recallItems 按预算截断', () => {
 })
 
 test('normalizeConfig 把越界值钳进合法区间', () => {
-  const config = normalizeConfig({ minFoldTokens: 1, maxPins: 999 })
-  assert.equal(config.minFoldTokens, 50)
+  const config = normalizeConfig({ maxNoteTokens: 1, maxPins: 999 })
+  assert.equal(config.maxNoteTokens, 20)
   assert.equal(config.maxPins, 999)
   assert.equal(normalizeConfig({ maxPins: 1000000 }).maxPins, 100000)
   assert.equal(normalizeConfig({ maxPinTextTokens: -5 }).maxPinTextTokens, 0)
@@ -525,8 +602,8 @@ test('pricing 用默认价兜底，金额按百万 token 折算', () => {
 
 test('normalizeConfig 忽略未知键并回调 warn', () => {
   const warnings = []
-  const config = normalizeConfig({ bogus: 1, minFoldTokens: 300 }, defaultConfig(), (message) => warnings.push(message))
-  assert.equal(config.minFoldTokens, 300)
+  const config = normalizeConfig({ bogus: 1, maxRecallTokens: 1000 }, defaultConfig(), (message) => warnings.push(message))
+  assert.equal(config.maxRecallTokens, 1000)
   assert.equal(Object.prototype.hasOwnProperty.call(config, 'bogus'), false)
   assert.equal(warnings.length, 1)
   assert.ok(warnings[0].includes('bogus'))
@@ -682,20 +759,31 @@ test('foldToolOutputs=false 时摘要、体量与召回载荷都不含工具输�
   const session = new FakeSession('sess-no-tools')
   const nodes = [
     userNode(1, '开始', 'user'),
-    assistantNode(2, { reasoning: '思'.repeat(800), calls: [{ id: 'c1', name: 'read' }] }),
+    assistantNode(2, { reasoning: '思'.repeat(30), calls: [{ id: 'c1', name: 'read' }] }),
     toolNode(3, 'c1', '果'.repeat(600)),
   ]
   session.seed(nodes)
   const store = new FoldStore({ homeDir, sessionId: session.id })
-  const result = foldTurn({
+  const withoutTools = foldTurn({
     session,
     turn: 1,
     nodes,
-    config: normalizeConfig({ minFoldTokens: 300, foldToolOutputs: false }),
+    config: normalizeConfig({ foldToolOutputs: false }),
     store,
     log: silent,
   })
-  assert.equal(result.folded, 0, '只算思考的 800 字，不到阈值')
+  // 只算 30 字思考：摘要（元信息）比原文还长，不折。
+  assert.equal(withoutTools.folded, 0, '工具输出不计入体量，100 字上下的一轮省不下来')
+
+  const withTools = foldTurn({
+    session,
+    turn: 1,
+    nodes,
+    config: normalizeConfig({ foldToolOutputs: true }),
+    store,
+    log: silent,
+  })
+  assert.equal(withTools.folded, 1, '计入 600 字工具输出后，摘要能省下一半以上')
 })
 
 test('foldTurn 用 maxFoldsPerTurn 限制每轮折几段', () => {
@@ -715,7 +803,7 @@ test('foldTurn 用 maxFoldsPerTurn 限制每轮折几段', () => {
     session,
     turn: 1,
     nodes,
-    config: normalizeConfig({ minFoldTokens: 50, maxFoldsPerTurn: 2 }),
+    config: normalizeConfig({ maxFoldsPerTurn: 2 }),
     store,
     log: silent,
   })
@@ -966,6 +1054,54 @@ test('载荷写失败时不写检查点，避免留下召回不到的死引用',
   const result = foldTurn({ session, turn: 1, nodes, config: normalizeConfig({}), store, log: silent })
   assert.equal(result.folded, 0)
   assert.equal(session.events.length, 0, '没有载荷就不该出现检查点')
+})
+
+test('检查点写入失败时撤回载荷，不留占号的孤儿', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const nodes = [
+    userNode(1, '帮我改代码', 'user'),
+    assistantNode(2, { reasoning: '思'.repeat(1600) }),
+  ]
+  const session = new FakeSession('sess-rollback')
+  session.seed(nodes)
+  // 载荷先落盘、检查点后写：检查点这一步失败时，刚才那条载荷就成了没人引用的孤儿。
+  session.append = () => {
+    throw new Error('磁盘满了')
+  }
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+  const warns = []
+  const result = foldTurn({
+    session,
+    turn: 1,
+    nodes,
+    config: normalizeConfig({}),
+    store,
+    log: { info() {}, warn: (message) => warns.push(message), error() {} },
+  })
+  assert.equal(result.folded, 0)
+  assert.equal(store.findFold('f1'), undefined, '载荷必须撤回，否则编号一直被占着')
+  assert.equal(store.folds().size, 0)
+  // 日志要能靠编号与 seq 区间定位到是哪一段出的问题。
+  assert.ok(warns.some((line) => line.includes('f1') && line.includes('seq 2–2')), warns.join('\n'))
+})
+
+test('同一轮再次折叠时编号递增，而不是静默跳过', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const session = new FakeSession('sess-twice')
+  const first = [userNode(1, '第一段', 'user'), assistantNode(2, { reasoning: '思'.repeat(1600) })]
+  session.seed(first)
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+  const config = normalizeConfig({})
+  const a = foldTurn({ session, turn: 1, nodes: first, config, store, log: silent })
+  assert.deepEqual(a.ids, ['f1'])
+
+  // 同一轮被关闭两次：第二次的段号会撞上 f1。早先这里直接跳过，后半段永远折不掉。
+  const second = [assistantNode(10, { reasoning: '续'.repeat(1600) })]
+  session.seed(second)
+  const b = foldTurn({ session, turn: 1, nodes: second, config, store, log: silent })
+  assert.deepEqual(b.ids, ['f1-2'])
+  assert.ok(store.findFold('f1-2'))
+  assert.equal(session.events.at(-1).data.source.foldId, 'f1-2')
 })
 
 test('同一轮超过 26 段时段号后缀继续 aa、ab', () => {
