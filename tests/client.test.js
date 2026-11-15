@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
+import { buildFoldIndex, describeFold, foldParts, renderFoldParts } from '../lib/recall.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const clientFile = join(here, '..', 'client', 'client.js')
@@ -434,3 +435,467 @@ test('客户端分段与召回同规则：长 markdown 回复按标题切段', (
   assert.ok(split[0].text.startsWith('[回复] ## 结论'), split[0].text)
   assert.equal(split[0].chars, ('## 结论\n' + 'a'.repeat(120)).length)
 })
+
+test('模型视角的召回标记：条目、折叠段与轮次标签', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  assert.equal(t.recallChipLabel({ id: 'f1c', parts: '48' }), '召回 f1c · 段 48')
+  assert.equal(t.recallChipLabel({ id: 'f3', query: 'lib/web.js' }), '召回 f3 · 筛「lib/web.js」')
+  assert.equal(t.recallChipLabel({ query: 'lib/web.js' }), '检索「lib/web.js」')
+  assert.ok(t.recallCallTitle({ id: 'f1c', via: 'run_code' }).includes('在 run_code 里调用'))
+
+  // 段号优先于原始选择器：parts 写 reply，解析出的 #128 才是「取过哪一段」。
+  assert.equal(t.recallChipLabel({ id: 'f4', parts: 'reply', segments: [128], segmentCount: 1 }), '召回 f4 · 段 #128')
+  assert.equal(t.recallChipLabel({ id: 'f3', parts: '1,3-5', segments: [1, 3, 4, 5], segmentCount: 4 }), '召回 f3 · 段 #1,#3-#5')
+  // 段号超出下发上限时给区间加总数，不让 chip 变成一串数字。
+  assert.equal(t.recallChipLabel({ id: 'f3', parts: 'all', segments: [1, 2, 3], segmentCount: 9 }), '召回 f3 · 段 #1-#3 等 9 段')
+  assert.ok(t.recallCallTitle({ id: 'f4', parts: 'reply', segments: [128], segmentCount: 1 }).includes('取回 #128'))
+  // 工具结果写明的三种形态：整段、只给目录、失败。chip 不假装有段号，原因写在 title 里。
+  assert.equal(t.recallChipLabel({ id: 'f3', outcome: 'direct', segments: [1, 2, 3], segmentCount: 3 }), '召回 f3 · 整段 3 段')
+  assert.equal(t.recallChipLabel({ id: 'f3', outcome: 'index', segments: [1, 2], segmentCount: 2 }), '召回 f3 · 目录 2 段')
+  assert.equal(t.recallChipLabel({ id: 'f3', outcome: 'error', note: '折叠 f3 里没有回复段' }), '召回 f3 · 未取回')
+  assert.ok(t.recallCallTitle({ id: 'f3', outcome: 'error', note: '折叠 f3 里没有回复段' }).includes('未取回：折叠 f3 里没有回复段'))
+  assert.ok(t.recallCallTitle({ id: 'f3', outcome: 'direct' }).includes('整段返回'))
+
+  const entry = t.EntryView({
+    entry: {
+      index: 2,
+      role: 'assistant',
+      roleLabel: '助手',
+      chars: 10,
+      blocks: [{ kind: 'call', name: 'run_code', text: 'await tools.fold_recall({ id: "f1c" })' }],
+      recallCalls: [{ id: 'f1c', query: '', parts: '48', via: 'run_code' }],
+    },
+  })
+  const entryText = JSON.stringify(entry)
+  assert.ok(entryText.includes('召回 f1c · 段 48'), entryText.slice(0, 600))
+
+  const checkpoint = t.EntryView({
+    entry: {
+      index: 3,
+      role: 'user',
+      isCheckpoint: true,
+      foldId: 'f1c',
+      chars: 20,
+      blocks: [],
+      recallCalls: [],
+      foldedRecallCount: 2,
+      recalledCount: 3,
+      foldRecord: {
+        id: 'f1c',
+        items: [{ seq: 5, chars: 10, blocks: [{ kind: 'call', name: 'fold_recall', text: '{}' }], recallCalls: [{ id: 'f2', query: '', parts: '', via: '' }] }],
+      },
+    },
+  })
+  const checkpointText = JSON.stringify(checkpoint)
+  assert.ok(checkpointText.includes('含召回 2 次'), checkpointText.slice(0, 600))
+  assert.ok(checkpointText.includes('被召回 3 次'), checkpointText.slice(0, 600))
+
+  const turn = t.TurnCard({
+    group: {
+      kind: 'turn',
+      turn: 1,
+      steps: 1,
+      chars: 100,
+      recallCallCount: 2,
+      recallSearchCount: 1,
+      recalledCount: 1,
+      pins: [],
+    },
+  })
+  const turnText = JSON.stringify(turn)
+  assert.ok(turnText.includes('召回 2 次'), turnText.slice(0, 800))
+  assert.ok(turnText.includes('检索 1 次'), turnText.slice(0, 800))
+  assert.ok(turnText.includes('被召回 1 次'), turnText.slice(0, 800))
+})
+
+test('段级召回标记：目录行、段头与折叠原文面板都带次数', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  const parts = [
+    { no: 1, kind: 'think', name: '', text: '第一段', chars: 3 },
+    { no: 2, kind: 'result', name: '', text: '第二段', chars: 3 },
+  ]
+  const lines = t.recallIndexLines(parts, 20, { 2: 2 })
+  assert.equal(lines[0].includes('召回×'), false)
+  assert.ok(lines[1].includes('召回×2'), lines[1])
+
+  const record = {
+    items: [
+      { seq: 1, blocks: [{ kind: 'think', text: '第一段' }] },
+      { seq: 2, blocks: [{ kind: 'result', text: '第二段' }] },
+    ],
+  }
+  const item = t.FoldItem({ index: 2, recallCount: 2, item: record.items[1] })
+  assert.ok(JSON.stringify(item).includes('被召回 2 次'), JSON.stringify(item).slice(0, 500))
+  // 收起的折叠原文面板也要在标题上给出合计，不必逐段展开。
+  const original = t.FoldOriginal({ record: record, recalledParts: { 2: 2 } })
+  assert.ok(JSON.stringify(original).includes('其中 1 段被召回 2 次'), JSON.stringify(original).slice(0, 600))
+  assert.equal(t.partRecallCount({ 2: 2 }, 2), 2)
+  assert.equal(t.partRecallCount({ 2: 2 }, 3), 0)
+})
+
+test('被检索：检索引用落到分段目录，目录反过来能查到检索', () => {
+  const { module } = loadClient()
+  const t = module.__test
+
+  // 1) 检索 chip 直接写命中量：只给 query 的调用没有折叠编号，命中的是一条条折叠的目录。
+  assert.equal(
+    t.recallChipLabel({ query: 'lib/web.js', outcome: 'search', searchFoldCount: 2, searchPartCount: 3 }),
+    '检索「lib/web.js」 · 2 折叠 3 段',
+  )
+
+  // 2) 检索调用的引用：每条折叠先一行「分段目录」，再逐段列出命中的段号。
+  const captured = []
+  t.NAV.refs = function (info) { captured.push(info) }
+  t.openCallRefs({
+    query: 'lib/web.js',
+    outcome: 'search',
+    searchFoldCount: 2,
+    searchPartCount: 3,
+    searchHits: [
+      { id: 'f1', turn: 1, count: 2, totalParts: 3, numbers: [1, 2], unlisted: 1, loc: { o: 2, i: 5 } },
+      // 命中的折叠不在这份历史里：不推可点条目，也不冒充落到别处。
+      { id: 'f9', turn: 1, count: 1, totalParts: 2, numbers: [1] },
+    ],
+  })
+  const panel = captured[0]
+  assert.ok(panel.title.includes('检索调用 · 检索「lib/web.js」'), panel.title)
+  assert.ok(panel.items[0].label.includes('f1（第 1 轮）· 分段目录 · 命中 2/3 段'), panel.items[0].label)
+  assert.deepEqual(panel.items[0].target, { o: 2, i: 5, dir: true })
+  assert.equal(panel.items[1].label, 'f1 段 #1')
+  assert.deepEqual(panel.items[1].target, { o: 2, i: 5, part: 1 })
+  assert.equal(panel.items.some((item) => item.label.startsWith('f9')), false)
+  assert.ok(panel.note.includes('另有 1 段命中'), panel.note)
+
+  // 3) 目录反过来查检索：段级走 searchedParts，折叠级走 searchedRefs。
+  t.openSearchRefs({ 2: [{ o: 2, i: 5, t: 2, query: 'lib/web.js' }] }, [], 2)
+  const segPanel = captured[1]
+  assert.equal(segPanel.title, '第 2 段被检索过')
+  assert.ok(segPanel.items[0].label.includes('检索「lib/web.js」'), segPanel.items[0].label)
+  assert.deepEqual(segPanel.items[0].target, { o: 2, i: 5 })
+  t.openSearchRefs({}, [{ o: 2, i: 5, t: 2, query: 'lib/web.js', count: 2, totalParts: 3, numbers: [1, 2] }], 0)
+  const dirPanel = captured[2]
+  assert.equal(dirPanel.title, '这张分段目录被检索过')
+  assert.ok(dirPanel.items[0].label.includes('命中 2/3 段'), dirPanel.items[0].label)
+  assert.ok(dirPanel.items[0].label.includes('#1-#2'), dirPanel.items[0].label)
+
+  // 4) 段级标记：段头「被检索」、目录行「检索×N」，与被召回分开算。
+  assert.equal(t.partSearchCount({ 2: [{}, {}] }, 2), 2)
+  assert.equal(t.partSearchCount({ 2: [{}, {}] }, 1), 0)
+  const item = t.FoldItem({
+    index: 2,
+    item: { seq: 3, chars: 20, blocks: [{ kind: 'result', text: '第二段' }] },
+    searchedParts: { 2: [{ o: 2, i: 5, query: 'lib/web.js' }] },
+  })
+  const itemText = JSON.stringify(item)
+  assert.ok(itemText.includes('被检索 1 次'), itemText.slice(0, 500))
+  assert.ok(itemText.includes('"color":"#f97316"'), itemText.slice(0, 500))
+  const lines = t.recallIndexLines(
+    [
+      { no: 1, kind: 'think', name: '', text: '第一段', chars: 3 },
+      { no: 2, kind: 'result', name: '', text: '第二段', chars: 3 },
+    ],
+    20,
+    { 2: 2 },
+    { 1: [{ o: 2, i: 5 }] },
+  )
+  assert.ok(lines[0].includes('检索×1'), lines[0])
+  assert.equal(lines[1].includes('检索×'), false, lines[1])
+  assert.ok(lines[1].includes('召回×2'), lines[1])
+
+  // 5) 目录被检索与折叠原文合计：收起时也能看出「只是被检索、没取原文」。
+  t.openSearchRefs({}, [{ o: 2, i: 5, t: 2, query: 'lib/web.js', count: 2, totalParts: 3, numbers: [1, 2] }], 0)
+  const longRecord = { items: Array.from({ length: 40 }, function (_, i) { return { seq: i + 1, blocks: [{ kind: 'think', text: '[思考] ' + '思'.repeat(400) }] } }) }
+  const original = t.FoldOriginal({
+    record: longRecord,
+    searchedParts: { 2: [{ o: 2, i: 5 }] },
+    searchedRefs: [{ o: 2, i: 5, t: 2, count: 2, totalParts: 40, numbers: [2, 5] }],
+    searchedCount: 1,
+  })
+  const originalText = JSON.stringify(original)
+  assert.ok(originalText.includes('其中 1 段被检索 1 次'), originalText.slice(0, 900))
+
+  // 6) 检查点条目与轮次标签也带「被检索」，与页头合计同向相加。
+  const checkpoint = t.EntryView({
+    entry: {
+      index: 6,
+      role: 'user',
+      isCheckpoint: true,
+      foldId: 'f1',
+      chars: 20,
+      blocks: [],
+      searchedCount: 1,
+      searchedPartCount: 2,
+      searchedRefs: [{ o: 2, i: 5, t: 2, query: 'lib/web.js', count: 2, totalParts: 3 }],
+      searchedParts: { 2: [{ o: 2, i: 5, t: 2, query: 'lib/web.js' }] },
+      foldRecord: { id: 'f1', items: [{ seq: 1, chars: 4, blocks: [{ kind: 'think', text: '第一段' }] }] },
+    },
+  })
+  const checkpointText = JSON.stringify(checkpoint)
+  assert.ok(checkpointText.includes('被检索 1 次 · 2 段次'), checkpointText.slice(0, 700))
+  assert.ok(checkpointText.includes('"color":"#f97316"'), checkpointText.slice(0, 700))
+
+  const turn = t.TurnCard({
+    group: { kind: 'turn', turn: 1, steps: 1, chars: 100, searchedCount: 1, searchedPartCount: 2, pins: [] },
+  })
+  const turnText = JSON.stringify(turn)
+  assert.ok(turnText.includes('被检索 1 次 · 2 段次'), turnText.slice(0, 900))
+})
+
+test('召回标记按方向分色：被召回红、召回黄、检索橘黄', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  // 三种方向各自的颜色：同一屏里要能只凭颜色分出「谁取了原文」「谁只是检索」「谁被取过」。
+  const entry = t.EntryView({
+    entry: {
+      index: 2,
+      role: 'assistant',
+      chars: 10,
+      blocks: [],
+      recallCalls: [{ id: 'f4', parts: 'reply', segments: [128], segmentCount: 1 }, { query: 'lib/web.js' }],
+      foldedRecallCount: 1,
+      foldedSearchCount: 1,
+      recalledCount: 2,
+      recalledPartCount: 3,
+    },
+  })
+  const entryText = JSON.stringify(entry)
+  assert.ok(entryText.includes('"color":"#eab308"'), '召回调用是黄的：' + entryText.slice(0, 400))
+  assert.ok(entryText.includes('"color":"#f97316"'), '检索是橘黄的：' + entryText.slice(0, 400))
+  assert.ok(entryText.includes('"color":"#ef4444"'), '被召回是红的：' + entryText.slice(0, 400))
+
+  // 是召回还是检索按有没有折叠编号分：只给 query 的不动原文，算检索。
+  const searchOnly = t.EntryView({ entry: { index: 3, role: 'assistant', chars: 5, blocks: [], recallCalls: [{ query: 'design.md' }] } })
+  assert.ok(JSON.stringify(searchOnly).includes('"color":"#f97316"'))
+  assert.equal(JSON.stringify(searchOnly).includes('"color":"#eab308"'), false)
+
+  // 段条目里的调用、折叠原文标题的合计、目录行的召回次数都跟同一套颜色走。
+  const item = t.FoldItem({
+    index: 4,
+    recallCount: 2,
+    item: { seq: 128, chars: 20, recallCalls: [{ id: 'f4', parts: 'reply', segments: [128], segmentCount: 1 }], blocks: [{ kind: 'reply', text: '[回复] hi' }] },
+  })
+  const itemText = JSON.stringify(item)
+  assert.ok(itemText.includes('"color":"#eab308"'), itemText.slice(0, 400))
+  assert.ok(itemText.includes('"color":"#ef4444"'), itemText.slice(0, 400))
+
+  const record = { items: Array.from({ length: 40 }, function (_, i) { return { seq: i + 1, blocks: [{ kind: 'think', text: '[思考] ' + '思'.repeat(400) }] } }) }
+  const original = t.FoldOriginal({ record: record, recalledParts: { 2: 3 } })
+  const originalText = JSON.stringify(original)
+  assert.ok(originalText.includes('其中 1 段被召回 3 次'), originalText.slice(0, 400))
+  assert.ok(originalText.includes('"color":"#ef4444"'), '折叠原文标题与目录行用被召回的红色：' + originalText.slice(0, 400))
+})
+
+test('折叠原文里的调用带段号，并能从段号反查到调用点', () => {
+  const { module } = loadClient({ open: true })
+  const t = module.__test
+  const record = {
+    id: 'f4',
+    replyTruncated: true,
+    items: [
+      {
+        seq: 128,
+        blocks: [
+          { kind: 'think', text: '[思考] 先看上一轮说了什么' },
+          { kind: 'call', name: 'fold_recall', text: '{"id":"f4","parts":["128"]}' },
+        ],
+        recallCalls: [{ id: 'f4', parts: 'reply', segments: [128], segmentCount: 1 }],
+        recallCallBlocks: [1],
+      },
+    ],
+  }
+  const parts = t.foldPartsOf(record)
+  // 调用随段带出来，但只挂在发出它的那一块上：同一消息的思考段不重复标。
+  assert.deepEqual(parts[0].calls, [])
+  assert.equal(parts[1].calls[0].id, 'f4')
+
+  // 段条目拿到的 refs 就是这一段自己的引用：同一份表既渲染「被召回」，也供面板跳转。
+  const refs = [{ o: 6, i: 24, t: 5, id: 'f4' }]
+  const node = t.FoldOriginal({ record: record, recalledParts: { 1: 1 }, partRefs: { 1: refs } })
+  const items = []
+  const walk = function (list) {
+    for (const child of list) {
+      if (!child) continue
+      if (Array.isArray(child)) { walk(child); continue }
+      if (child.type === t.FoldItem) items.push(child)
+      else if (Array.isArray(child.children)) walk(child.children)
+    }
+  }
+  walk(node.children)
+  assert.equal(items.length, 2)
+  assert.deepEqual(items[0].props.refs, refs)
+  // 被召回的是第 1 段（思考段），发起调用的是第 2 段（调用段）：两边各标各的。
+  const recalledText = JSON.stringify(t.FoldItem(items[0].props))
+  assert.ok(recalledText.includes('被召回 1 次'), recalledText.slice(0, 800))
+  assert.equal(recalledText.includes('召回 f4 · 段 #128'), false, '思考段不该重复标调用：' + recalledText.slice(0, 800))
+  const callText = JSON.stringify(t.FoldItem(items[1].props))
+  assert.ok(callText.includes('召回 f4 · 段 #128'), callText.slice(0, 800))
+  assert.equal(callText.includes('被召回 1 次'), false)
+
+  // 被引用的一端：同一次调用的多段并成一条，写明轮次与折叠编号，目标就是调用条目。
+  assert.deepEqual(
+    t.partRefItems({ 128: [{ o: 6, i: 24, t: 5, id: 'f4' }], 129: [{ o: 6, i: 24, t: 5, id: 'f4' }] }),
+    [{ label: '第 5 轮 · 召回 f4 · 段 #128-#129', target: { o: 6, i: 24 } }]
+  )
+})
+
+test('引用落点精确到调用所在的那一段，并能按段过滤', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  // 同一轮里两处调用取回了同一段：两条落点各带自己的段号，跳转才不会都停在检查点上。
+  const table = {
+    128: [
+      { o: 6, i: 24, t: 5, id: 'f4', part: 20 },
+      { o: 6, i: 30, t: 5, id: 'f4' },
+    ],
+    129: [{ o: 6, i: 24, t: 5, id: 'f4', part: 20 }],
+  }
+  assert.deepEqual(t.partRefItems(table), [
+    { label: '第 5 轮 · 召回 f4 · 段 #128-#129 · 调用在第 20 段', target: { o: 6, i: 24, part: 20 } },
+    { label: '第 5 轮 · 召回 f4 · 段 #128', target: { o: 6, i: 30 } },
+  ])
+  // 从一段反查：只列这一段自己的调用，别把同一份折叠里别的段也叫进来。
+  assert.deepEqual(t.partRefItems(table, 129), [
+    { label: '第 5 轮 · 召回 f4 · 段 #129 · 调用在第 20 段', target: { o: 6, i: 24, part: 20 } },
+  ])
+})
+
+test('段上的「被召回」只列这一段自己的引用', () => {
+  const { module } = loadClient({ open: true })
+  const t = module.__test
+  const captured = []
+  t.NAV.refs = function (info) { captured.push(info) }
+  const partRefs = {
+    195: [{ o: 4, i: 17, t: 3, id: 'f3', part: 2 }],
+    196: [{ o: 4, i: 17, t: 3, id: 'f3', part: 2 }],
+  }
+  const node = t.FoldItem({
+    index: 195,
+    recallCount: 1,
+    partRefs: partRefs,
+    refs: partRefs[195],
+    item: { seq: 1, chars: 10, blocks: [{ kind: 'think', text: '[思考] x' }] },
+  })
+  const summary = node.children[0]
+  const chip = summary.children.find(function (child) { return child && child.props && typeof child.props.onClick === 'function' })
+  assert.ok(chip, '收回行里的「被召回」标签应当可点：' + JSON.stringify(summary).slice(0, 600))
+  chip.props.onClick({ preventDefault: function () {}, stopPropagation: function () {} })
+  assert.equal(captured[0].title, '第 195 段被谁召回过')
+  assert.deepEqual(captured[0].items, [
+    { label: '第 3 轮 · 召回 f3 · 段 #195 · 调用在第 2 段', target: { o: 4, i: 17, part: 2 } },
+  ])
+})
+
+test('轮卡片上的召回与被召回能点开引用，并落到调用那一段', async () => {
+  const { module } = loadClient()
+  const t = module.__test
+  const captured = []
+  t.NAV.refs = function (info) {
+    captured.push(info)
+    t.NAV.panelGen = (t.NAV.panelGen || 0) + 1
+  }
+  const entries = [{
+    index: 14,
+    isCheckpoint: true,
+    foldId: 'f2',
+    roleLabel: 'user',
+    partRefs: { 128: [{ o: 6, i: 24, t: 5, id: 'f4', part: 20 }] },
+    foldRecord: {
+      items: [
+        { seq: 9, blocks: [{ kind: 'think', text: '[思考] 想' }] },
+        {
+          seq: 9,
+          blocks: [{ kind: 'call', name: 'run_code', text: '{}' }],
+          recallCalls: [{ id: 'f4', segments: [128], segmentCount: 1, partNo: 2 }],
+          recallCallBlocks: [0],
+        },
+      ],
+    },
+  }]
+  // 调用落在折叠原文里：列表给的是「检查点 + 第几段」，点一下能直接展开到那一段。
+  assert.deepEqual(t.turnCallItems(entries, 3), [
+    { label: '折叠摘要 f2 · 召回 f4 · 段 #128 · 调用在第 2 段', target: { o: 3, i: 14, part: 2 } },
+  ])
+  assert.deepEqual(t.turnRecalledItems(entries), [
+    { label: '第 5 轮 · 召回 f4 · 段 #128 · 调用在第 20 段', target: { o: 6, i: 24, part: 20 } },
+  ])
+
+  const turn = t.TurnCard({
+    group: { kind: 'turn', ordinal: 3, turn: 2, steps: 1, recallCallCount: 1, recalledCount: 1, recalledPartCount: 1 },
+    sessionId: 's1',
+    stamp: 1,
+  })
+  const summary = turn.children[0].children[0]
+  const chips = summary.children[0].children[1]
+  const callChip = chips.find(function (chip) { return String(chip.children[0]).indexOf('召回 1 次') === 0 })
+  const recalledChip = chips.find(function (chip) { return String(chip.children[0]).indexOf('被召回 1 次') === 0 })
+  assert.ok(callChip && recalledChip, JSON.stringify(chips).slice(0, 600))
+
+  const events = []
+  const event = {
+    preventDefault: function () { events.push('preventDefault') },
+    stopPropagation: function () { events.push('stopPropagation') },
+  }
+  callChip.props.onClick(event)
+  // 标签在 summary 里：不掐掉默认行为，点标签就只会把整轮展开。
+  assert.deepEqual(events, ['preventDefault', 'stopPropagation'])
+  assert.equal(captured[0].title, '第 2 轮 · 召回调用')
+  assert.deepEqual(captured[0].items, [])
+  assert.ok(captured[0].note.includes('正在读取'), captured[0].note)
+
+  recalledChip.props.onClick(event)
+  await new Promise(function (resolve) { setTimeout(resolve, 0) })
+  // 测试环境没有网络：加载失败要说原因，而不是留一个空面板。
+  const last = captured[captured.length - 1]
+  assert.equal(last.title, '第 2 轮 · 被召回的段')
+  assert.ok(last.note.includes('读取这一轮的正文失败'), last.note)
+})
+
+test('同一消息的思考段不重复标记召回调用', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  const calls = [{ id: 'f1c', parts: '48', segments: [48], segmentCount: 1 }]
+  const blocks = [{ kind: 'think', text: '[思考] 想' }, { kind: 'call', name: 'run_code', text: '{}' }]
+
+  // 有块归属：只挂到第 2 块（调用块）。
+  const owned = t.foldPartsOf({ items: [{ seq: 9, blocks: blocks, recallCalls: calls, recallCallBlocks: [1] }] })
+  assert.deepEqual(owned.map((part) => part.calls.length), [0, 1])
+
+  // 老数据没有块归属：调用块整条带走，思考段仍然不标。
+  const legacy = t.foldPartsOf({ items: [{ seq: 9, blocks: blocks, recallCalls: calls }] })
+  assert.deepEqual(legacy.map((part) => part.calls.length), [0, 1])
+
+  // 只有思考块却被挂上了调用记录（旧载荷）：一段也不标，宁可不标也不标错。
+  const thinkOnly = t.foldPartsOf({ items: [{ seq: 9, blocks: [blocks[0]], recallCalls: calls }] })
+  assert.deepEqual(thinkOnly[0].calls, [])
+})
+
+test('引用面板给落点段带正文预览', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  const record = {
+    items: [
+      { seq: 5, blocks: [{ kind: 'think', text: '[思考] 先读 f4 的目录' }] },
+      { seq: 5, blocks: [{ kind: 'call', name: 'read', text: '{}' }] },
+    ],
+  }
+  const entries = [{ index: 3, isCheckpoint: true, foldRecord: record }]
+  assert.equal(t.segmentPreviewOf(entries, { o: 1, i: 3, part: 1 }), '先读 f4 的目录')
+  // 段号越界、条目对不上都不给预览：面板只显示段号，不猜内容。
+  assert.equal(t.segmentPreviewOf(entries, { o: 1, i: 3, part: 9 }), '')
+  assert.equal(t.segmentPreviewOf(entries, { o: 1, i: 4, part: 1 }), '')
+  assert.equal(t.segmentPreviewOf(entries, { o: 1, i: 3 }), '')
+
+  // 预览去掉段头的 [类型] 前缀，长段只取开头一段。
+  const long = t.segmentPreview('[工具结果] ' + '果'.repeat(300))
+  assert.equal(long.endsWith('…'), true, long)
+  assert.ok(long.length <= 121, '预览长度：' + long.length)
+  assert.equal(t.segmentPreview('[工具结果] '), '')
+
+  // 只有「跳到某一段」的条目才有预览键。
+  assert.equal(t.panelKeyOf({ target: { o: 2, i: 3, part: 4 } }), '2:3:4')
+  assert.equal(t.panelKeyOf({ target: { o: 2, i: 3 } }), '')
+  assert.equal(t.panelKeyOf({ target: { o: 6, i: 24 } }), '')
+})
+

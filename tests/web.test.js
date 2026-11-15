@@ -13,6 +13,7 @@ import {
   turnPath,
   viewPath,
 } from '../lib/web.js'
+import { describeFold, foldParts, renderFoldParts } from '../lib/recall.js'
 
 function fakeRes() {
   const state = { status: 0, headers: null, body: '' }
@@ -403,6 +404,186 @@ test('turn 路由把折叠原文载荷一起给到，展开检查点才能对照
   assert.ok(JSON.stringify(checkpoint.foldRecord).includes('原始思考'))
 })
 
+test('view 与 turn 路由带召回标记：条目、轮次合计与页面合计', () => {
+  const fold = {
+    kind: 'fold',
+    id: 'f1',
+    turn: 1,
+    at: 1,
+    chars: 100,
+    note: '【已折叠历史】 第 1 轮已折叠，原文用 fold_recall("f1") 召回',
+    // 折叠前的调用：宿主把工具包在 run_code 里时，真正的召回写在脚本里（参数是 JSON，脚本在 code 字段）。
+    items: [
+      {
+        seq: 2,
+        text: '[调用 run_code] ' + JSON.stringify({ code: 'await tools.fold_recall({ id: "f1", parts: ["2"] })' }),
+      },
+    ],
+  }
+  const messages = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: '第一句' }], source: { kind: 'user' } },
+    { id: 'a1', role: 'assistant', content: [{ type: 'tool-call', name: 'fold_recall', arguments: '{"id":"f9"}' }], source: { kind: 'model' } },
+    { id: 't1', role: 'tool', content: [{ type: 'text', text: '折叠 f9（第 1 轮）取回 1/2 段' }], source: { kind: 'model' } },
+    { id: 'c1', role: 'user', content: [{ type: 'text', text: '【已折叠历史】 f1' }], source: { kind: 'checkpoint', foldId: 'f1' } },
+  ]
+  const store = {
+    readAll: () => [fold, { kind: 'recall', id: 'f1', at: 2, mode: 'parts' }],
+    folds: () => new Map([['f1', fold]]),
+    pins: () => [],
+  }
+  const session = fakeSession('s1', messages)
+  const view = createViewHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const viewRes = fakeRes()
+  view(fakeReq(viewPath + '?session=s1'), viewRes)
+  const body = JSON.parse(viewRes.state.body)
+  // 首包没有条目，轮次合计与页面合计仍要能直接显示。
+  const group = body.groups.find((item) => item.kind === 'turn')
+  assert.equal(group.recallCallCount, 2)
+  assert.equal(group.recallSearchCount, 0)
+  assert.equal(group.recalledCount, 1)
+  assert.deepEqual(body.recallTotals, { calls: 2, searches: 0, recalled: 1, folds: 1, parts: 0, searched: 0, searchedFolds: 0 })
+
+  const turn = createTurnHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const turnRes = fakeRes()
+  turn(fakeReq(turnPath + '?session=s1&ordinal=' + group.ordinal), turnRes)
+  const entries = JSON.parse(turnRes.state.body).entries
+  const direct = entries.find((entry) => !entry.isCheckpoint && entry.recallCalls.length > 0)
+  assert.equal(direct.recallCalls[0].id, 'f9')
+  const checkpoint = entries.find((entry) => entry.isCheckpoint)
+  assert.equal(checkpoint.recalledCount, 1)
+  assert.equal(checkpoint.foldedRecallCount, 1)
+  assert.equal(checkpoint.foldRecord.items[0].recallCalls[0].id, 'f1')
+  // 块归属跟着下发：页面按块切段后才知道标记该挂在哪一段。
+  assert.deepEqual(checkpoint.foldRecord.items[0].recallCallBlocks, [0])
+})
+
+test('分段召回标记：标到具体段，父级只做加法', () => {
+  const fold = {
+    kind: 'fold',
+    id: 'f1',
+    turn: 1,
+    at: 1,
+    chars: 160,
+    note: '【已折叠历史】 第 1 轮已折叠，原文用 fold_recall("f1") 召回',
+    // 检查点里回复被截断，回复段参与分段编号。
+    replyTruncated: true,
+    items: [
+      { seq: 11, text: '[思考] 第一段 ' + 'x'.repeat(40) },
+      { seq: 12, text: '[工具结果] 第二段 ' + 'y'.repeat(40) },
+      { seq: 13, text: '[回复] 第三段' },
+    ],
+  }
+  const messages = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: '第一句' }], source: { kind: 'user' } },
+    { id: 'c1', role: 'user', content: [{ type: 'text', text: '【已折叠历史】 f1' }], source: { kind: 'checkpoint', foldId: 'f1' } },
+    // 两次分段召回：一次选第 2 段，一次选 1-2 段；段次合计 3。
+    { id: 'a1', role: 'assistant', content: [{ type: 'tool-call', name: 'fold_recall', arguments: '{"id":"f1","parts":["2"]}' }], source: { kind: 'model' } },
+    { id: 'a2', role: 'assistant', content: [{ type: 'tool-call', name: 'fold_recall', arguments: '{"id":"f1","parts":["1-2"]}' }], source: { kind: 'model' } },
+  ]
+  const store = {
+    readAll: () => [fold, { kind: 'recall', id: 'f1', at: 2, mode: 'parts' }, { kind: 'recall', id: 'f1', at: 3, mode: 'parts' }],
+    folds: () => new Map([['f1', fold]]),
+    pins: () => [],
+  }
+  const session = fakeSession('s1', messages)
+  const view = createViewHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const viewRes = fakeRes()
+  view(fakeReq(viewPath + '?session=s1'), viewRes)
+  const body = JSON.parse(viewRes.state.body)
+  const group = body.groups.find((item) => item.kind === 'turn')
+  assert.equal(group.recalledCount, 2)
+  assert.equal(group.recalledPartCount, 3)
+  assert.equal(body.recallTotals.parts, 3)
+
+  const turn = createTurnHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const turnRes = fakeRes()
+  turn(fakeReq(turnPath + '?session=s1&ordinal=' + group.ordinal), turnRes)
+  const entries = JSON.parse(turnRes.state.body).entries
+  // 调用本身也带解析出的段号：页面上的 chip 直接是「召回 f1 · 段 #2」。
+  const calling = entries.filter((entry) => !entry.isCheckpoint && entry.recallCalls.length > 0)
+  assert.deepEqual(calling[0].recallCalls[0].segments, [2])
+  assert.equal(calling[0].recallCalls[0].segmentCount, 1)
+  assert.deepEqual(calling[1].recallCalls[0].segments, [1, 2])
+  assert.equal(calling[1].recallCalls[0].segmentCount, 2)
+
+  const checkpoint = entries.find((entry) => entry.isCheckpoint)
+  assert.deepEqual(checkpoint.recalledParts, { 1: 1, 2: 2 })
+  assert.equal(checkpoint.recalledPartCount, 3)
+  // 客户端要按同一条规则跳过长回复段，得知道回复有没有被截断。
+  assert.equal(checkpoint.foldRecord.replyTruncated, true)
+})
+
+test('关键词检索的引用：命中落到分段目录与具体段，目录反过来能查到检索', () => {
+  const fold = {
+    kind: 'fold',
+    id: 'f1',
+    turn: 1,
+    at: 1,
+    chars: 160,
+    note: '【已折叠历史】 第 1 轮已折叠，原文用 fold_recall("f1") 召回',
+    replyTruncated: false,
+    items: [
+      { seq: 11, text: '[思考] 第一段 ' + 'x'.repeat(40) },
+      { seq: 12, text: '[工具结果] 第二段 ' + 'y'.repeat(40) },
+      { seq: 13, text: '[回复] 第三段' },
+    ],
+  }
+  // 检索结果的原样文本：每条折叠一行头，下面是列出的段号，没列出来的只有数量。
+  const searchText = [
+    '检索「lib/web.js」：命中 2 条折叠、共 3 段（按轮次从近到远）。检索不返回原文，也不算一次召回。',
+    '- f1（第 1 轮）命中 2/3 段',
+    '  #1 [思考] 45 字：第一段 xxxx',
+    '  #2 [工具结果] 45 字：第二段 yyyy',
+    '  …还有 1 段命中，用 parts 区间选',
+    '- f9（第 1 轮）命中 1/2 段',
+    '  #1 [思考] 10 字：别的折叠',
+    '取回原文：fold_recall({id:"f1", parts:["1","2"]})',
+  ].join('\n')
+  const messages = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: '第一句' }], source: { kind: 'user' } },
+    { id: 'c1', role: 'user', content: [{ type: 'text', text: '【已折叠历史】 f1' }], source: { kind: 'checkpoint', foldId: 'f1' } },
+    { id: 'u2', role: 'user', content: [{ type: 'text', text: '第二句' }], source: { kind: 'user' } },
+    // 只给 query 的检索：没有折叠编号，原文不返回，命中的是别的折叠的分段目录。
+    { id: 'a2', role: 'assistant', content: [{ type: 'tool-call', name: 'fold_recall', arguments: '{"query":"lib/web.js"}' }], source: { kind: 'model' } },
+    { id: 't2', role: 'tool', content: [{ type: 'text', text: searchText }], source: { kind: 'model' } },
+  ]
+  const store = {
+    readAll: () => [fold],
+    folds: () => new Map([['f1', fold]]),
+    pins: () => [],
+  }
+  const session = fakeSession('s1', messages)
+  const view = createViewHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const viewRes = fakeRes()
+  view(fakeReq(viewPath + '?session=s1'), viewRes)
+  const body = JSON.parse(viewRes.state.body)
+  const checkpointGroup = body.groups.find((item) => item.kind === 'turn' && item.searchedCount > 0)
+  assert.ok(checkpointGroup, '被检索的折叠所在的轮要有合计')
+  assert.equal(checkpointGroup.searchedCount, 1)
+  assert.equal(checkpointGroup.searchedPartCount, 2)
+  // 页面合计与轮次标签只做加法：f9 没有落点，但它的命中段仍计入总数。
+  assert.equal(body.recallTotals.searched, 2)
+  assert.equal(body.recallTotals.searchedFolds, 1)
+
+  const turn = createTurnHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const turnRes = fakeRes()
+  turn(fakeReq(turnPath + '?session=s1&ordinal=' + checkpointGroup.ordinal), turnRes)
+  const entries = JSON.parse(turnRes.state.body).entries
+  const checkpoint = entries.find((entry) => entry.isCheckpoint)
+  // 段级：命中的两段各记一条引用，带关键词；不是被召回，所以 recalledParts 不出现。
+  assert.deepEqual(Object.keys(checkpoint.searchedParts).sort(), ['1', '2'])
+  assert.equal(checkpoint.searchedParts[1][0].query, 'lib/web.js')
+  assert.equal(checkpoint.searchedPartCount, 2)
+  assert.equal(checkpoint.searchedCount, 1)
+  assert.equal(checkpoint.recalledParts, undefined)
+  // 折叠级：这张目录被哪次检索用过、命中多少段。
+  assert.equal(checkpoint.searchedRefs.length, 1)
+  assert.equal(checkpoint.searchedRefs[0].count, 2)
+  assert.equal(checkpoint.searchedRefs[0].totalParts, 3)
+  assert.deepEqual(checkpoint.searchedRefs[0].numbers, [1, 2])
+  assert.equal(typeof checkpoint.searchedRefs[0].i, 'number')
+})
+
 test('turn 路由缺参数 400、找不到会话 404、序号越界 404', () => {
   const handler = createTurnHandler({
     resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', demoMessages) : undefined),
@@ -561,3 +742,120 @@ test('/fold-* 只允许本机同源：非回环 Host、跨站 Origin、非 JSON 
   assert.equal(allowed.state.status, 200)
 })
 
+test('召回调用按工具结果标到段，并带调用与被召回的落点', () => {
+  const fold = {
+    kind: 'fold',
+    id: 'f1',
+    turn: 1,
+    at: 1,
+    chars: 120,
+    replyTruncated: true,
+    items: [
+      { seq: 11, text: '[思考] ' + 'x'.repeat(40) },
+      { seq: 12, text: '[工具结果] ' + 'y'.repeat(40) },
+    ],
+  }
+  const parts = foldParts(fold)
+  const partsText = renderFoldParts(fold, parts.filter((part) => part.no === 2), { total: parts.length, maxChars: 20000 })
+  const directText = describeFold(fold)
+  const messages = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: '第一句' }], source: { kind: 'user' } },
+    { id: 'c1', role: 'user', content: [{ type: 'text', text: '【已折叠历史】 f1' }], source: { kind: 'checkpoint', foldId: 'f1' } },
+    { id: 'a1', role: 'assistant', content: [{ type: 'tool-call', name: 'fold_recall', arguments: '{"id":"f1","parts":["2"]}' }], source: { kind: 'model' } },
+    { id: 't1', role: 'tool', content: [{ type: 'text', text: partsText }], source: { kind: 'model' } },
+    { id: 'a2', role: 'assistant', content: [{ type: 'tool-call', name: 'fold_recall', arguments: '{"id":"f1"}' }], source: { kind: 'model' } },
+    { id: 't2', role: 'tool', content: [{ type: 'text', text: directText }], source: { kind: 'model' } },
+    { id: 'a3', role: 'assistant', content: [{ type: 'tool-call', name: 'fold_recall', arguments: '{"id":"f1","parts":["reply"]}' }], source: { kind: 'model' } },
+    { id: 't3', role: 'tool', content: [{ type: 'text', text: '折叠 f1 里没有回复段（这条折叠共 2 段）。' }], source: { kind: 'model' } },
+  ]
+  const store = { readAll: () => [fold], folds: () => new Map([['f1', fold]]), pins: () => [] }
+  const session = fakeSession('s1', messages)
+  const view = createViewHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const viewRes = fakeRes()
+  view(fakeReq(viewPath + '?session=s1'), viewRes)
+  const body = JSON.parse(viewRes.state.body)
+  const group = body.groups.find((item) => item.kind === 'turn')
+
+  const turn = createTurnHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const turnRes = fakeRes()
+  turn(fakeReq(turnPath + '?session=s1&ordinal=' + group.ordinal), turnRes)
+  const entries = JSON.parse(turnRes.state.body).entries
+  const calling = entries.filter((entry) => !entry.isCheckpoint && entry.recallCalls.length > 0)
+
+  // 分段召回：结果里写着取回了 #2，段号按结果走，落点是这条折叠的检查点。
+  assert.equal(calling[0].recallCalls[0].outcome, 'parts')
+  assert.deepEqual(calling[0].recallCalls[0].segments, [2])
+  assert.deepEqual(calling[0].recallCalls[0].foldLoc, { o: group.ordinal, i: 2 })
+  // 整段召回：结果给的是全文，就是这条折叠的全部段。
+  assert.equal(calling[1].recallCalls[0].outcome, 'direct')
+  assert.deepEqual(calling[1].recallCalls[0].segments, [1, 2])
+  assert.equal(calling[1].recallCalls[0].segmentCount, 2)
+  // 失败召回：原因来自结果第一行，不给段号。
+  assert.equal(calling[2].recallCalls[0].outcome, 'error')
+  assert.equal(calling[2].recallCalls[0].note, '折叠 f1 里没有回复段（这条折叠共 2 段）。')
+  assert.equal(calling[2].recallCalls[0].segments, undefined)
+
+  // 被召回的一端：段 2 只被第一次（参数选段）调用取回，引用表指向调用所在的条目。
+  const checkpoint = entries.find((entry) => entry.isCheckpoint)
+  assert.deepEqual(checkpoint.partRefs, { 2: [{ o: group.ordinal, i: 3, t: 1, id: 'f1' }] })
+})
+
+test('调用发生在折叠原文里时，引用落点精确到那一段', () => {
+  const target = {
+    kind: 'fold',
+    id: 'f1',
+    turn: 1,
+    at: 1,
+    chars: 90,
+    replyTruncated: true,
+    items: [
+      { seq: 11, text: '[思考] ' + 'x'.repeat(30) },
+      { seq: 12, text: '[工具结果] ' + 'y'.repeat(30) },
+    ],
+  }
+  // 第二次调用发生在 f2 的折叠原文里：引用表要记住它是第 2 段发出的，
+  // 否则点「第 2 段被谁召回过」只会打开检查点，看不出是哪一处调用。
+  const caller = {
+    kind: 'fold',
+    id: 'f2',
+    turn: 2,
+    at: 2,
+    chars: 120,
+    replyTruncated: true,
+    items: [
+      { seq: 20, text: '[思考] 先看目录' },
+      { seq: 20, text: '[调用 run_code] ' + JSON.stringify({ code: 'await tools.fold_recall({ id: "f1", parts: ["2"] })' }) },
+      { seq: 21, text: '[工具结果] 折叠 f1 取回 #2' },
+    ],
+  }
+  const messages = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: '第一句' }], source: { kind: 'user' } },
+    { id: 'c1', role: 'user', content: [{ type: 'text', text: '【已折叠历史】 f1' }], source: { kind: 'checkpoint', foldId: 'f1' } },
+    { id: 'u2', role: 'user', content: [{ type: 'text', text: '第二句' }], source: { kind: 'user' } },
+    { id: 'c2', role: 'user', content: [{ type: 'text', text: '【已折叠历史】 f2' }], source: { kind: 'checkpoint', foldId: 'f2' } },
+  ]
+  const store = { readAll: () => [target, caller], folds: () => new Map([['f1', target], ['f2', caller]]), pins: () => [] }
+  const session = fakeSession('s1', messages)
+  const view = createViewHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const viewRes = fakeRes()
+  view(fakeReq(viewPath + '?session=s1'), viewRes)
+  const groups = JSON.parse(viewRes.state.body).groups.filter((item) => item.kind === 'turn')
+  assert.equal(groups.length, 2)
+
+  const turn = createTurnHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const read = (group) => {
+    const res = fakeRes()
+    turn(fakeReq(turnPath + '?session=s1&ordinal=' + group.ordinal), res)
+    return JSON.parse(res.state.body).entries
+  }
+  const first = read(groups[0])
+  const second = read(groups[1])
+  const fromFold = second.find((entry) => entry.isCheckpoint)
+  // 调用在 f2 原文的第 2 段（第 1 段是思考、第 3 段是结果）。
+  assert.equal(fromFold.foldRecord.items[1].recallCalls[0].partNo, 2)
+
+  const checkpoint = first.find((entry) => entry.isCheckpoint)
+  assert.deepEqual(checkpoint.partRefs, {
+    2: [{ o: groups[1].ordinal, i: fromFold.index, t: 2, id: 'f1', part: 2 }],
+  })
+})

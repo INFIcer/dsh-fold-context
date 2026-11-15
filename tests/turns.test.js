@@ -254,3 +254,80 @@ test('同一轮被切成多条检查点时不换轮', () => {
   assert.equal(turnGroups.length, 1)
   assert.deepEqual(turnGroups[0].foldIds, ['f1a', 'f1b'])
 })
+
+test('召回调用标在条目与折叠段上，并汇总到轮次标签', () => {
+  // 真实数据里工具参数是 JSON 字符串：run_code 的脚本在 code 字段里，扫描前要先解码。
+  const nested = 'const q = await tools.fold_recall({ query: "lib/web.js" });\nconst r = await tools.fold_recall({ id: "f1c", parts: ["48"] });'
+  const groups = buildTurnGroups({
+    entries: [
+      userEntry('第一句'),
+      entry({
+        role: 'assistant',
+        blocks: [{ kind: 'call', name: 'fold_recall', text: '{"id":"f3","parts":["1","3-5"]}' }],
+      }),
+      entry({ role: 'assistant', blocks: [{ kind: 'call', name: 'run_code', text: JSON.stringify({ code: nested }) }] }),
+      // 参数里只是引用了字样、没有真的调用：不算召回。
+      entry({ role: 'assistant', blocks: [{ kind: 'call', name: 'run_code', text: JSON.stringify({ code: 'const example = "tools.fold_recall(";' }) }] }),
+      checkpointEntry({
+        foldId: 'f1c',
+        noteChars: 20,
+        items: [
+          { seq: 5, chars: 20, blocks: [{ kind: 'call', name: 'fold_recall', text: '{"query":"fold-view MB 17"}' }] },
+          { seq: 6, chars: 10, blocks: [{ kind: 'reply', name: '', text: '答一句' }] },
+        ],
+      }),
+    ],
+    recallCounts: new Map([['f1c', 2]]),
+  })
+  const turn = groups.find((group) => group.kind === 'turn')
+  assert.equal(turn.recallCallCount, 2)
+  assert.equal(turn.recallSearchCount, 2)
+  assert.equal(turn.recalledCount, 2)
+
+  const direct = turn.entries[1]
+  assert.deepEqual(direct.recallCalls, [{ id: 'f3', query: '', parts: '1,3-5', via: '' }])
+  const nestedEntry = turn.entries[2]
+  assert.deepEqual(nestedEntry.recallCalls.map((call) => [call.id, call.query, call.via]), [
+    ['', 'lib/web.js', 'run_code'],
+    ['f1c', '', 'run_code'],
+  ])
+  assert.equal(turn.entries[3].recallCalls.length, 0)
+
+  const checkpoint = turn.entries[4]
+  assert.equal(checkpoint.recalledCount, 2)
+  assert.equal(checkpoint.foldedRecallCount, 0)
+  assert.equal(checkpoint.foldedSearchCount, 1)
+  const recalledPart = checkpoint.foldRecord.items[0]
+  assert.deepEqual(recalledPart.recallCalls, [{ id: '', query: 'fold-view MB 17', parts: '', via: '' }])
+})
+
+test('折叠段的调用带块归属：标记只落在调用块上', () => {
+  // 一个折叠段里常常先有思考、再有调用，页面按块切成两段，标记只能标到后面那一段。
+  const nested = 'await tools.fold_recall({ id: "f2", parts: ["1"] })'
+  const groups = buildTurnGroups({
+    entries: [
+      userEntry('第一句'),
+      checkpointEntry({
+        foldId: 'f1c',
+        noteChars: 40,
+        items: [
+          {
+            seq: 5,
+            chars: 40,
+            text: '[思考] 先看目录\n[调用 run_code] ' + JSON.stringify({ code: nested }),
+            // 真实数据里 inspect 会把段文本按标记拆成块，这里给同一形态。
+            blocks: [
+              { kind: 'think', name: '', text: '先看目录' },
+              { kind: 'call', name: 'run_code', text: JSON.stringify({ code: nested }) },
+            ],
+          },
+        ],
+      }),
+    ],
+  })
+  const turn = groups.find((group) => group.kind === 'turn')
+  const item = turn.entries[1].foldRecord.items[0]
+  assert.equal(item.recallCalls.length, 1)
+  // 第 0 块是思考、第 1 块是调用：页面据此只标第 2 段。
+  assert.deepEqual(item.recallCallBlocks, [1])
+})
