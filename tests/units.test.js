@@ -358,10 +358,11 @@ test('estimateNoteChars 与实际长度一致：标题摘要按实际标题算�
   assert.ok(headingNote.text.includes('# t19'), '标题摘要不更短时保留原文：' + headingNote.text)
 })
 
-test('系统提示词用配置值渲染 minFoldRatio', () => {
-  const text = systemPromptText({ minFoldRatio: 0.35 })
+test('系统提示词的自定义文案可以引用 minFoldRatio', () => {
+  const text = systemPromptText({ minFoldRatio: 0.35, systemPromptText: '阈值 {{minFoldRatio}}，召回 {{recallTool}}' })
   assert.ok(text.includes('0.35'), text)
-  assert.ok(!text.includes('{{minFoldRatio}}'), text)
+  assert.ok(text.includes('fold_recall'), text)
+  assert.equal(text.includes('{{'), false, text)
 })
 
 test('TurnTracker 累加每步 provider 回报，snapshot 一并交出并清空', () => {
@@ -721,6 +722,13 @@ test('systemPromptText 支持占位替换与自定义文案', () => {
   assert.ok(text.includes('逐字'), '允许逐字抄原文')
   assert.ok(text.includes('加载技能'), '技能规则要先固化再执行')
   assert.equal(text.includes('读文件、写文件、加载技能的步骤不折叠'), false, '自动保护的说法已撤回')
+  // 提示词以保真为先：给正向许可，不拿「占上下文」的代价劝模型少记少取。
+  assert.ok(text.includes('保真'), '保真优先')
+  assert.ok(text.includes('积极召回'), '需要原文时积极召回')
+  assert.ok(text.includes('markdown 标题分节'), '长回复按标题分节')
+  assert.equal(text.includes('划算'), false, '不再比较 pin 与召回的成本')
+  assert.equal(text.includes('只固化真会再用'), false, '不再用代价暗示压缩')
+  assert.equal(text.includes('不敢记'), false, '不再强调省字')
 
   const custom = systemPromptText({ maxNoteTokens: 400, systemPromptText: '召回 {{recallTool}}，固化 {{pinTool}}，调 {{configTool}}，未知 {{keep}}' })
   assert.ok(custom.includes('召回 fold_recall'))
@@ -971,7 +979,7 @@ test('renderSearchResults 只给编号与段号，不给原文', () => {
   assert.ok(text.includes('检索「lib/web.js」'), text)
   assert.ok(text.includes('f5'), text)
   assert.ok(text.includes('取回原文：fold_recall({id:"f5"'), text)
-  assert.ok(text.includes('不算一次召回'), text)
+  assert.ok(text.includes('用来定位'), text)
   assert.ok(!text.includes('exact'), '检索结果不能贴原文')
 
   const miss = renderSearchResults('没有命中', searchFolds(SEARCH_RECORDS, '没命中'), {})
