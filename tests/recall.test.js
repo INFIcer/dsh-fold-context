@@ -160,6 +160,32 @@ test('回复完整写入检查点时，召回不再返回回复段', () => {
   assert.deepEqual(foldParts(record()).map((part) => part.kind), ['think', 'reply', 'call', 'result'])
 })
 
+test('整段召回按块剔除回复：多行回复不会留下孤儿行', () => {
+  const rec = {
+    kind: 'fold',
+    id: 'f3',
+    turn: 5,
+    chars: 200,
+    replyTruncated: false,
+    items: [
+      { seq: 1, text: '[思考] 想了一下\n[回复] 第一行\n第二行\n第三行\n[调用 edit] {"a":1}' },
+      { seq: 2, text: '[回复] 只有回复的一段' },
+      { seq: 3, text: '[工具结果] 完成' },
+    ],
+  }
+  const text = describeFold(rec)
+  // 早先按行过滤只删掉带前缀的首行，回复正文的其它行会以孤儿行留在原处，
+  // 既跟检查点里的回复重复，又读不出它原本属于哪一段。
+  assert.equal(text.includes('[回复]'), false)
+  assert.equal(text.includes('第二行'), false, text)
+  assert.equal(text.includes('第三行'), false, text)
+  assert.equal(text.includes('[思考] 想了一下'), true)
+  assert.equal(text.includes('[调用 edit]'), true)
+  assert.equal(text.includes('[工具结果] 完成'), true)
+  // 只有回复的节点整条不出现，也不会单独留一个空标题。
+  assert.equal(text.includes('--- #2 ---'), false)
+})
+
 test('长 markdown 回复超过召回额度时按标题切段，短回复仍整段', () => {
   const md = '## 结论\n' + 'a'.repeat(120) + '\n## 改动\n' + 'b'.repeat(120) + '\n## 验证\n' + 'c'.repeat(120)
   const rec = { kind: 'fold', id: 'f8', turn: 3, items: [{ seq: 1, text: '[回复] ' + md }] }
