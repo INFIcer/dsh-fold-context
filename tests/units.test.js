@@ -731,6 +731,10 @@ test('promptSection 用配置里的 order，默认 order 是 300', () => {
   assert.equal(fallback.interpolate, false)
   const moved = promptSection(normalizeConfig({ promptOrder: 120 }))
   assert.equal(moved.order, 120)
+  // 关掉总开关 = 不注入提示段（段名与 order 还在，文本为空，宿主据此跳过注册）。
+  const off = promptSection(normalizeConfig({ enabled: false, promptOrder: 120 }))
+  assert.equal(off.text, '')
+  assert.equal(off.name, 'fold-compression')
 })
 
 test('recallReminder 支持阈值与自定义文案占位', () => {

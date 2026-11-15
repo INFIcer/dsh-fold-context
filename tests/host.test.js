@@ -182,7 +182,7 @@ test('轮内发布的消息在插件重启后补投，注入成功后删掉待�
   api2.stop()
 })
 
-test('配置里关掉开关就只注册工具，不折叠', async () => {
+test('配置里关掉总开关：不折叠、不注入提示段、也不注册工具', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
   writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ enabled: false }), 'utf8')
   const ctx = makeCtx()
@@ -196,8 +196,39 @@ test('配置里关掉开关就只注册工具，不折叠', async () => {
   emit(ctx, session, { type: 'turn/end', seq: 6, data: { turn: 1, reason: { kind: 'stop' } } })
   await tick()
   assert.equal(checkpointOf(session), undefined)
-  assert.ok(toolNamed(ctx, 'fold_recall'))
+  // 模型侧完全静默：既没有折叠说明，也没有三个工具，账单才等于「没有这个插件」。
+  assert.equal(ctx.sections.length, 0)
+  assert.equal(ctx.registrations.length, 0)
   assert.equal(api.getConfig().enabled, false)
+  api.stop()
+})
+
+test('总开关翻转时提示段与工具跟着上下，不用重启', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-toggle')
+  assert.ok(toolNamed(ctx, 'fold_config'))
+  assert.ok(ctx.sections.some((section) => section.name === 'fold-compression'))
+
+  // fold_config 关掉的是它自己：注册项必须挪到下一拍再摘，否则会在自己的调用里被 dispose。
+  const off = await toolNamed(ctx, 'fold_config').execute({ action: 'set', patch: { enabled: false } }, { agent: { session } })
+  assert.equal(off.ok, true)
+  await tick()
+  assert.equal(toolNamed(ctx, 'fold_recall'), undefined)
+  assert.equal(toolNamed(ctx, 'fold_pin'), undefined)
+  assert.equal(toolNamed(ctx, 'fold_config'), undefined)
+  assert.equal(ctx.sections.some((section) => section.name === 'fold-compression'), false)
+
+  // 关掉之后设置页仍能把它打开：下一轮重新挂上提示段与工具。
+  writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ enabled: true }), 'utf8')
+  emit(ctx, session, { type: 'turn/start', seq: 2, data: { turn: 2 } })
+  emit(ctx, session, { type: 'step/start', seq: 3, data: { turn: 2, step: 1 } })
+  emit(ctx, session, { type: 'turn/end', seq: 4, data: { turn: 2, reason: { kind: 'stop' } } })
+  await tick()
+  assert.ok(toolNamed(ctx, 'fold_recall'))
+  assert.ok(toolNamed(ctx, 'fold_config'))
+  assert.ok(ctx.sections.some((section) => section.name === 'fold-compression'))
   api.stop()
 })
 
