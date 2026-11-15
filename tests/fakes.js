@@ -1,8 +1,10 @@
 // 测试用的假宿主：只实现插件真正用到的那几个接口。
 
 export class FakeSession {
-  constructor(id = 'session-1') {
+  constructor(id = 'session-1', header) {
     this.id = id
+    // 真宿主的 header 带 origin / parentSession；测试按需构造子代理与 fork 会话。
+    if (header) this.header = header
     this.seq = 0
     this.events = []
     this.nodes = []

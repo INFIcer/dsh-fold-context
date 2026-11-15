@@ -415,3 +415,89 @@ test('官方压缩吞掉重要消息时不补发：淡化交给压缩层', async
   assert.equal(pinRows.length, 1, 'fold-store 不写补发记录')
   api.stop()
 })
+
+test('子代理里 fold_pin 被拒绝，不写待投递记录也不写账本', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const parent = new FakeSession('sess-parent-pin')
+  const child = new FakeSession('sess-sub-pin', { origin: 'subagent', parentSession: 'sess-parent-pin' })
+  child.seed([userNode(1, '开始', 'user')])
+  // 父会话先被观察到：子代理解析父会话时走运行时缓存。
+  emit(ctx, parent, { type: 'turn/start', seq: 1, data: { turn: 1 } })
+
+  const pin = await toolNamed(ctx, 'fold_pin').execute({ label: '结论', text: '不该写进去' }, { agent: { session: child } })
+  assert.equal(pin.ok, false)
+  assert.ok(pin.text.includes('最终回答'), pin.text)
+  assert.equal(sessionPinEvents(child), 0)
+
+  const store = new FoldStore({ homeDir, sessionId: 'sess-sub-pin' })
+  assert.equal(store.pendingPins().length, 0, '拒绝后不该留下待投递记录')
+  assert.equal(store.pins().length, 0, '拒绝后不该写账本')
+  api.stop()
+})
+
+test('子代理里 fold_config 只读：get 照常，set 与 reset 拒绝且不落盘', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const child = new FakeSession('sess-sub-cfg', { origin: 'subagent' })
+  const tool = toolNamed(ctx, 'fold_config')
+
+  const shown = await tool.execute({ action: 'get' }, { agent: { session: child } })
+  assert.equal(shown.ok, true)
+  assert.ok(shown.text.includes('maxNoteTokens'))
+
+  const before = api.getConfig().maxNoteTokens
+  const set = await tool.execute({ action: 'set', patch: { maxNoteTokens: 400 } }, { agent: { session: child } })
+  assert.equal(set.ok, false)
+  assert.ok(set.text.includes('全局配置'), set.text)
+  assert.equal(api.getConfig().maxNoteTokens, before, '子代理不能改进程级配置')
+
+  const reset = await tool.execute({ action: 'reset' }, { agent: { session: child } })
+  assert.equal(reset.ok, false)
+
+  let written = true
+  try {
+    readFileSync(join(homeDir, 'fold-config.json'))
+  } catch {
+    written = false
+  }
+  assert.equal(written, false, '被拒绝的写不该碰配置文件')
+  api.stop()
+})
+
+test('fork 子会话能召回父会话的折叠载荷，父会话不再可达时说明原因', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const parent = new FakeSession('sess-fork-parent')
+  parent.seed([userNode(1, '开始', 'user')])
+  emit(ctx, parent, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+  emit(ctx, parent, { type: 'step/start', seq: 3, data: { turn: 1, step: 1 } })
+  emitSurface(ctx, parent, assistantNode(4, { reasoning: '父会话的思考'.repeat(300) }))
+  emit(ctx, parent, { type: 'step/end', seq: 5, data: { turn: 1, step: 1 } })
+  emit(ctx, parent, { type: 'turn/end', seq: 6, data: { turn: 1, reason: { kind: 'stop' } } })
+  await tick()
+  assert.ok(checkpointOf(parent))
+
+  // fork 会话的 seed 带着父会话的检查点，载荷却只存在父会话的文件里。
+  const child = new FakeSession('sess-fork-child', { origin: 'subagent', parentSession: 'sess-fork-parent' })
+  const tool = toolNamed(ctx, 'fold_recall')
+  const hit = await tool.execute({ id: 'f1' }, { agent: { session: child } })
+  assert.equal(hit.ok, true, hit.text)
+  assert.ok(hit.text.includes('父会话的思考'))
+
+  // 父会话查不到（不在运行时缓存、也没有 sessions 服务）：要说「暂时读不到」，不能说「从来没有过」。
+  const orphan = new FakeSession('sess-fork-orphan', { origin: 'subagent', parentSession: 'sess-gone' })
+  const miss = await tool.execute({ id: 'f1' }, { agent: { session: orphan } })
+  assert.equal(miss.ok, false)
+  assert.ok(miss.text.includes('读不到'), miss.text)
+  assert.equal(miss.text.includes('没有编号'), false)
+  api.stop()
+})
+
+function sessionPinEvents(session) {
+  return session.events.filter((event) => event.data && event.data.source && event.data.source.kind === 'fold-pin').length
+}
+

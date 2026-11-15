@@ -1170,3 +1170,39 @@ test('ConfigStore 写盘失败时抛错，不假装成功', () => {
   store.load({})
   assert.throws(() => store.save({ maxNoteTokens: 400 }), /写配置文件失败/)
 })
+
+test('fork 子会话的 store 只读取回退到父 store，且不跨父汇总', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const parent = new FoldStore({ homeDir, sessionId: 'fork-parent' })
+  parent.append({ kind: 'fold', id: 'f1', turn: 1, chars: 10, items: [{ seq: 1, text: '父会话原文' }] })
+  const child = new FoldStore({
+    homeDir,
+    sessionId: 'fork-child',
+    parentStoreOf: (id) => (id === 'fork-child' ? parent : null),
+    hasParentOf: () => true,
+  })
+  // 单条读取跨父：fork 的 seed 里带着父会话检查点，编号必须能换回原文。
+  assert.equal(child.findFold('f1').items[0].text, '父会话原文')
+  assert.equal(child.isPruned('f1'), false)
+  // 汇总不跨父：账本按会话计价，把父会话的折叠算进来会重复。
+  assert.equal(child.folds().size, 0)
+  assert.equal(child.pins().length, 0)
+
+  // 父里被清理过的编号要报「已清理」，不能报成「从来没有过」。
+  const prunedParent = new FoldStore({ homeDir, sessionId: 'fork-pruned-parent' })
+  prunedParent.pruned.add('f9')
+  const child2 = new FoldStore({ homeDir, sessionId: 'fork-child-2', parentStoreOf: () => prunedParent })
+  assert.equal(child2.isPruned('f9'), true)
+
+  // 父会话不可达：只读回退失败时返回 undefined，且能说明是「不可达」而不是没有父会话。
+  const orphan = new FoldStore({ homeDir, sessionId: 'fork-orphan', parentStoreOf: () => null, hasParentOf: () => true })
+  assert.equal(orphan.findFold('f1'), undefined)
+  assert.equal(orphan.parentUnreachable(), true)
+  const standalone = new FoldStore({ homeDir, sessionId: 'standalone' })
+  assert.equal(standalone.parentUnreachable(), false)
+
+  // 自引用（父指向自己）不能死循环。
+  const loop = new FoldStore({ homeDir, sessionId: 'fork-loop', parentStoreOf: () => loop })
+  assert.equal(loop.findFold('f1'), undefined)
+})
+
