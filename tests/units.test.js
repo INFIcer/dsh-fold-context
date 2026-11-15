@@ -234,12 +234,57 @@ test('fold-pin 切断片段，前面的内容仍可整段折叠', () => {
   assert.deepEqual(segments.map((segment) => segment.map((n) => n.seq)), [[1, 2], [4]])
 })
 
+test('planSegments 按工具名保护读文件、写文件、加载技能的整步', () => {
+  const nodes = [
+    assistantNode(1, { calls: [{ id: 'c1', name: 'bash', args: { command: 'npm test' } }] }),
+    toolNode(2, 'c1', '测试通过'),
+    assistantNode(3, { reasoning: '先看源码'.repeat(100), calls: [{ id: 'c2', name: 'read' }] }),
+    toolNode(4, 'c2', '源码'.repeat(200)),
+    assistantNode(5, { text: '收尾' }),
+  ]
+  const segments = planSegments(nodes, { keepTools: 'read', keepPaths: '', keepFileOps: false })
+  // 保护步骤前面已经积累的内容仍是一段；它自己与结果留在原文，后面的回复另起一段。
+  assert.deepEqual(segments.map((segment) => segment.map((n) => n.seq)), [[1, 2], [5]])
+})
+
+test('planSegments 按路径片段保护 run_code 里读写记忆文件的步骤', () => {
+  // 工具名不认识、代码里也刻意不写文件 API：只靠参数里的路径片段命中。
+  const nodes = [
+    assistantNode(1, { calls: [{ id: 'c1', name: 'run_code', args: { code: 'const p = "E:\\dsh-memory-guide\\docs\\memory.md"' } }] }),
+    toolNode(2, 'c1', '记忆正文'.repeat(100)),
+    assistantNode(3, { text: '看完了' }),
+  ]
+  const segments = planSegments(nodes, { keepTools: '', keepPaths: 'dsh-memory-guide/', keepFileOps: false })
+  assert.deepEqual(segments.map((segment) => segment.map((n) => n.seq)), [[3]])
+})
+
+test('planSegments 按代码里的文件 API 保护，keepFileOps 关掉后不再保护', () => {
+  const nodes = [
+    assistantNode(1, { calls: [{ id: 'c1', name: 'run_code', args: { code: 'const text = await tools.read({ file_path: "E:/repo/lib/web.js" })' } }] }),
+    toolNode(2, 'c1', '正文'.repeat(100)),
+    assistantNode(3, { text: '读完了' }),
+  ]
+  // 工具名与路径片段都不在清单里，只有文件 API 命中。
+  const on = planSegments(nodes, { keepTools: '', keepPaths: '', keepFileOps: true })
+  assert.deepEqual(on.map((segment) => segment.map((n) => n.seq)), [[3]])
+  // 关掉后同一段照常进入片段：调用与结果一起。
+  const off = planSegments(nodes, { keepTools: '', keepPaths: '', keepFileOps: false })
+  assert.deepEqual(off.map((segment) => segment.map((n) => n.seq)), [[1, 2, 3]])
+
+  // 技能加载同样走 tools.skill( 这条判据；整步受保护时没有任何片段可折。
+  const skill = planSegments(
+    [assistantNode(1, { calls: [{ id: 'c1', name: 'run_code', args: { code: 'await tools.skill({ name: "write-code" })' } }] })],
+    { keepTools: '', keepPaths: '', keepFileOps: true },
+  )
+  assert.deepEqual(skill, [])
+})
+
 test('foldTurn 折叠够长的一轮，并留下可召回的载荷', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
   const session = new FakeSession('sess-a')
   const nodes = [
     userNode(1, '帮我改代码', 'user'),
-    assistantNode(2, { reasoning: '思'.repeat(800), calls: [{ id: 'c1', name: 'read' }] }),
+    assistantNode(2, { reasoning: '思'.repeat(800), calls: [{ id: 'c1', name: 'bash' }] }),
     toolNode(3, 'c1', '果'.repeat(600)),
   ]
   session.seed(nodes)
@@ -749,7 +794,7 @@ test('recallReminder 支持阈值与自定义文案占位', () => {
 
 test('foldToolOutputs=false 时摘要、体量与召回载荷都不含工具输出', () => {
   const stats = statsOf([
-    assistantNode(1, { reasoning: 'x'.repeat(300), text: 'y'.repeat(100), calls: [{ id: 'c1', name: 'read' }] }),
+    assistantNode(1, { reasoning: 'x'.repeat(300), text: 'y'.repeat(100), calls: [{ id: 'c1', name: 'bash' }] }),
     toolNode(2, 'c1', 'z'.repeat(500)),
   ])
   assert.equal(totalChars(stats), 900)
@@ -763,7 +808,7 @@ test('foldToolOutputs=false 时摘要、体量与召回载荷都不含工具输�
   const session = new FakeSession('sess-no-tools')
   const nodes = [
     userNode(1, '开始', 'user'),
-    assistantNode(2, { reasoning: '思'.repeat(30), calls: [{ id: 'c1', name: 'read' }] }),
+    assistantNode(2, { reasoning: '思'.repeat(30), calls: [{ id: 'c1', name: 'bash' }] }),
     toolNode(3, 'c1', '果'.repeat(600)),
   ]
   session.seed(nodes)

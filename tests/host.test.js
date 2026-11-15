@@ -50,7 +50,7 @@ test('turn/end 后把本轮折叠成一条检查点消息，并注入提示段�
   emit(ctx, session, { type: 'turn/start', seq: 3, data: { turn: 1 } })
   emit(ctx, session, { type: 'step/start', seq: 4, data: { turn: 1, step: 1 } })
   emitSurface(ctx, session, userNode(6, '帮我实现折叠', 'user'))
-  emitSurface(ctx, session, assistantNode(7, { reasoning: '思'.repeat(700), calls: [{ id: 'c1', name: 'read' }] }))
+  emitSurface(ctx, session, assistantNode(7, { reasoning: '思'.repeat(700), calls: [{ id: 'c1', name: 'bash' }] }))
   emitSurface(ctx, session, toolNode(8, 'c1', '果'.repeat(600)))
   emit(ctx, session, { type: 'step/end', seq: 9, data: { turn: 1, step: 1 } })
   emit(ctx, session, { type: 'turn/end', seq: 10, data: { turn: 1, reason: { kind: 'stop' } } })
@@ -282,7 +282,7 @@ test('长折叠先回目录，再用 parts 多选取回，目录查询不算一�
   session.seed([userNode(1, '开始', 'user')])
   emit(ctx, session, { type: 'turn/start', seq: 2, data: { turn: 1 } })
   emit(ctx, session, { type: 'step/start', seq: 3, data: { turn: 1, step: 1 } })
-  emitSurface(ctx, session, assistantNode(4, { reasoning: '思'.repeat(1000), text: '答'.repeat(1600), calls: [{ id: 'c1', name: 'read' }] }))
+  emitSurface(ctx, session, assistantNode(4, { reasoning: '思'.repeat(1000), text: '答'.repeat(1600), calls: [{ id: 'c1', name: 'bash' }] }))
   emitSurface(ctx, session, toolNode(5, 'c1', '果'.repeat(400)))
   emit(ctx, session, { type: 'step/end', seq: 6, data: { turn: 1, step: 1 } })
   emit(ctx, session, { type: 'turn/end', seq: 7, data: { turn: 1, reason: { kind: 'stop' } } })
@@ -325,6 +325,8 @@ test('fold_config 拒绝未知键，get 里能看到分级召回的字段', asyn
 
 test('折叠摘要带文件清单，关键词检索能把这一轮找回来', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  // 本用例要断言 read/edit 被折掉后留下的「· 文件：」行，所以关掉文件读写保护，让它们照常折叠。
+  writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ keepTools: '', keepPaths: '', keepFileOps: false }), 'utf8')
   const ctx = makeCtx()
   const api = assemble(ctx, { homeDir, logFile: null })
   const session = new FakeSession('sess-files')
