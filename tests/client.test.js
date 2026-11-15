@@ -941,3 +941,147 @@ test('折叠原文的分段目录收成一行，段列表仍是逐段折叠条�
   assert.equal(bodyItems.length, 11)
 })
 
+test('清单过长时进滚动区：展开只多一屏，页面高度不随段数增长', () => {
+  const { module } = loadClient({ open: true })
+  const t = module.__test
+  // 假 createElement 不摊平数组子节点，这里自己摊平一层。
+  const flat = function (nodes) {
+    const out = []
+    const walk = function (list) {
+      for (const child of list) {
+        if (Array.isArray(child)) walk(child)
+        else out.push(child)
+      }
+    }
+    walk(nodes)
+    return out
+  }
+  const many = function (count, chars) {
+    return Array.from({ length: count }, function (_, i) {
+      return { seq: 1000 + i, blocks: [{ kind: 'think', text: '思'.repeat(chars) }] }
+    })
+  }
+  const isScroller = function (child) {
+    return Boolean(child && child.props && child.props.style && child.props.style.overflowY === 'auto')
+  }
+  const config = { maxRecallTokens: 1000, recallIndexPreviewTokens: 25, minFoldRatio: 0.5 }
+
+  // 长清单：60 段整份进一个限高的滚动框，段数再多页面也只多一屏。
+  const long = t.FoldOriginal({ record: { id: 'f9', turn: 9, replyTruncated: true, items: many(60, 40) }, config: config })
+  const longBody = flat(long.children[1].children)
+  const partBox = longBody.find(isScroller)
+  assert.ok(partBox, '长清单应装进滚动区')
+  assert.ok(String(partBox.props.style.maxHeight).includes('vh'), '限高按视口算，不写死像素')
+  assert.equal(flat(partBox.children).filter(function (child) { return child && child.type === t.FoldItem }).length, 60)
+
+  // 目录行同样限高：60 行的目录点开也只占一屏（短段才会走到目录这一支）。
+  const wide = t.FoldOriginal({ record: { id: 'f9', turn: 9, replyTruncated: true, items: many(60, 400) }, config: config })
+  const wideBody = flat(wide.children[1].children)
+  const dir = wideBody.find(function (child) { return child && child.type === 'details' })
+  assert.ok(dir, '目录应是独立的折叠条目')
+  // 目录正文那一层就是滚动框本身（点开后才有），不必再往里摊一层。
+  assert.ok(isScroller(dir.children[1]), '60 行的目录应装进滚动区')
+
+  // 短清单不套壳：10 段以内仍直接挂在面板第一层。
+  const short = t.FoldOriginal({ record: { id: 'f9', turn: 9, replyTruncated: true, items: many(10, 40) }, config: config })
+  assert.equal(flat(short.children[1].children).some(isScroller), false)
+
+  // 召回结果里的取回段也是同一套：段多了限高，尾注（切分点、没取回）留在框外。
+  const segments = Array.from({ length: 30 }, function (_, i) {
+    return { no: i + 1, label: '思考', text: 'x'.repeat(50), cut: null }
+  })
+  const view = t.RecallResult({
+    parsed: {
+      kind: 'parts', id: 'f4', turn: 4, picked: 30, total: 30, head: '折叠 f4（第 4 轮）取回 30/30 段：',
+      segments: segments, notes: [{ cut: true, text: '（还有 2 段没取回，需要时按段再召回。）' }], lines: [],
+    },
+  })
+  const viewBody = flat(view.children[1].children)
+  const segBox = viewBody.find(isScroller)
+  assert.ok(segBox, '取回段多时也要限高')
+  assert.equal(flat(segBox.children).filter(function (child) { return child && child.type === t.RecallSegment }).length, 30)
+  const hasMissingNote = function (child) {
+    return Boolean(child && Array.isArray(child.children) && String(child.children[0] || '').includes('没取回'))
+  }
+  assert.ok(viewBody.some(hasMissingNote), '尾注要在正文里')
+  assert.equal(flat(segBox.children).some(hasMissingNote), false, '尾注不能被滚进框内')
+
+  // 召回返回的是分段目录时（正文只有逐行清单），行多了也一样限高。
+  const indexLines = Array.from({ length: 60 }, function (_, i) { return '#' + (i + 1) + ' [思考] 40 字：预览' })
+  const indexView = t.RecallResult({
+    parsed: { kind: 'index', id: 'f4', turn: 4, chars: '2,400', totalParts: 60, head: '', lines: indexLines, segments: [], notes: [] },
+  })
+  const indexBody = flat(indexView.children[1].children)
+  assert.ok(indexBody.some(isScroller), '60 行的召回目录也要限高')
+  // 目录形态的收起行同样带目录自身的字数与 token。
+  const indexHead = JSON.stringify(indexView.children[0])
+  assert.ok(indexHead.includes('分段目录 60 段（原文没有返回） · '), indexHead)
+  assert.ok(/[\d.]+k? 字（≈[\d.]+k? token）/.test(indexHead), indexHead)
+})
+
+test('检查点里回复没被截断时，客户端段号与召回一样跳过回复段', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  const items = [
+    { seq: 1, blocks: [{ kind: 'think', text: '[思考] 想' }] },
+    { seq: 2, blocks: [{ kind: 'reply', text: '[回复] 答' }] },
+  ]
+  assert.deepEqual(t.foldPartsOf({ replyTruncated: false, items: items }).map((part) => part.kind), ['think'])
+  assert.deepEqual(t.foldPartsOf({ items: items }).map((part) => part.kind), ['think', 'reply'])
+})
+
+test('召回结果按段折叠：取回范围、截断点与没取回的段都标出来', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  const record = {
+    id: 'f4',
+    turn: 4,
+    chars: 4000,
+    replyTruncated: true,
+    items: [
+      { seq: 101, text: '[思考] ' + 'x'.repeat(2000) },
+      { seq: 102, text: '[工具结果] ' + 'y'.repeat(2000) },
+    ],
+  }
+  const parts = foldParts(record)
+  const text = renderFoldParts(record, parts, { maxChars: 900, total: parts.length })
+  const parsed = t.parseRecallResult(text)
+  assert.equal(parsed.kind, 'parts')
+  assert.equal(parsed.id, 'f4')
+  assert.equal(parsed.picked, parts.length)
+  assert.equal(parsed.total, parts.length)
+  assert.equal(parsed.segments.length, 1, '预算只够放下一段，另一段应标成没取回')
+  assert.ok(parsed.segments[0].cut, '这一段超过单次上限，应标截断')
+  assert.ok(parsed.segments[0].cut.full > parsed.segments[0].cut.kept)
+  assert.ok(parsed.notes.some((note) => note.cut && note.text.includes('没取回')), JSON.stringify(parsed.notes))
+
+  const view = t.RecallResult({ parsed: parsed })
+  const viewText = JSON.stringify(view)
+  assert.ok(viewText.includes('分段取回'), viewText.slice(0, 600))
+  assert.ok(viewText.includes('段被截断'), viewText.slice(0, 600))
+  assert.ok(viewText.includes('段没取回'), viewText.slice(0, 600))
+  // 收起行要直接写出取回的段号区间，不必展开逐段核对。
+  assert.ok(viewText.includes('（#1）'), viewText.slice(0, 600))
+  assert.ok(t.recallCutText({ full: 7337, kept: 2462 }).includes('7,337'), '截断点要写清原文与已返回的字数')
+
+  // 整段取回与分段目录也要认出来，各自折成一层。
+  const direct = t.parseRecallResult(describeFold(record))
+  assert.equal(direct.kind, 'direct')
+  assert.equal(direct.segments.length, 2)
+  const index = t.parseRecallResult(buildFoldIndex(record, { previewChars: 20, maxChars: 220 }))
+  assert.equal(index.kind, 'index')
+  assert.equal(index.id, 'f4')
+  assert.ok(index.notes.some((note) => note.text.includes('目录已截断')), JSON.stringify(index.notes))
+
+  // 普通工具结果不能被误认成召回结果。
+  assert.equal(t.parseRecallResult('折叠不是 f4'), null)
+  assert.equal(t.parseRecallResult('【已折叠历史】 第 4 轮'), null)
+
+  // BlockView 认出来后交给 RecallResult 渲染，不再平铺整块正文。
+  const block = t.BlockView({ block: { kind: 'result', text: text } })
+  const recallChild = block.children.find((child) => child && child.type === t.RecallResult)
+  assert.ok(recallChild, '召回结果应交给 RecallResult 渲染')
+  const rendered = JSON.stringify(t.RecallResult(recallChild.props))
+  assert.ok(rendered.includes('分段取回'), rendered.slice(0, 800))
+  assert.equal(rendered.includes(text.slice(0, 120)), false, '正文不应被平铺')
+})

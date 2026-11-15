@@ -12,6 +12,8 @@ window.__ModuleLoader__.load({
     var react = require('react')
 
     var h = react.createElement
+    // 宿主注入的 react 版本不一定带 useMemo；没有就退回每次现算，解析本身是线性的。
+    var useMemoHook = typeof react.useMemo === 'function' ? react.useMemo : null
     var REFRESH_MS = 5000
     // 构成图要服务端重建一份模型视角，比账本数字贵得多，单独按更慢的节奏拉。
     var COMPOSITION_REFRESH_MS = 20000
@@ -33,6 +35,12 @@ window.__ModuleLoader__.load({
       var n = typeof value === 'number' && isFinite(value) ? value : 0
       if (n >= 1000) return (n / 1000).toFixed(1) + 'k 字'
       return Math.round(n) + ' 字'
+    }
+
+    // 切分点要精确到字：这是「原文多少字 / 这次给了多少」的坐标，不能四舍五入成 7.3k。
+    function exactChars(value) {
+      var n = typeof value === 'number' && isFinite(value) ? Math.round(value) : 0
+      return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' 字'
     }
 
     // 字数与 token 一起给：4 字符 ≈ 1 token，与宿主 token-meter 的基本档一致。
@@ -813,12 +821,231 @@ window.__ModuleLoader__.load({
       return out
     }
 
+    // ---------- 召回结果：分段原文折起来看，截断点单独标出来 ----------
+    // 模型视角里的 fold_recall 返回就是一整块工具结果正文，分段召回动辄几万字：
+    // 平铺进 DOM 既卡，也看不出哪一段是取回的、单次上限切在哪。
+    // 这里沿用工具自己写的段头再切一遍，每段一个折叠条目，切分点单独一行。
+    var CUT_STYLE = {
+      fontSize: '11px',
+      lineHeight: '17px',
+      color: '#b45309',
+      background: 'rgba(217,119,6,.10)',
+      border: '1px dashed rgba(217,119,6,.55)',
+      borderRadius: '5px',
+      padding: '3px 7px',
+      marginTop: '4px',
+    }
+
+    function isNoteLine(line) {
+      return /^(（|…（)/.test(String(line || ''))
+    }
+
+    // 三种返回形态各有一种表头（整段 / 分段 / 目录）；认不出来就退回普通块，绝不改写原文。
+    function parseRecallResult(text) {
+      var value = typeof text === 'string' ? text : ''
+      if (value.indexOf('折叠 ') !== 0) return null
+      var newline = value.indexOf('\n')
+      var head = newline < 0 ? value : value.slice(0, newline)
+      var body = newline < 0 ? '' : value.slice(newline + 1)
+      var match = null
+      var result = null
+      if ((match = /^折叠 (\S+)（第 (\d+) 轮）取回 (\d+)\/(\d+) 段：$/.exec(head))) {
+        result = { kind: 'parts', id: match[1], turn: Number(match[2]), picked: Number(match[3]), total: Number(match[4]) }
+      } else if ((match = /^折叠 (\S+)（第 (\d+) 轮，原文约 ([\d,]+) 字，≈(\d+) token，共 (\d+) 段）原文较长，先给目录。$/.exec(head))) {
+        // 组号依次是：编号、轮次、原文字数、token 估算、总段数。
+        result = { kind: 'index', id: match[1], turn: Number(match[2]), chars: match[3], totalParts: Number(match[5]) }
+      } else if ((match = /^折叠 (\S+)（第 (\d+) 轮，原文约 ([\d,]+) 字，≈(\d+) token）$/.exec(head))) {
+        result = { kind: 'direct', id: match[1], turn: Number(match[2]), chars: match[3] }
+      }
+      if (!result) return null
+      result.head = head
+      result.segments = []
+      result.notes = []
+      result.lines = []
+      var lines = body.split('\n')
+
+      // 目录：正文是逐行的段号清单，尾注是「目录已截断」这类提示。
+      if (result.kind === 'index') {
+        for (var li = 0; li < lines.length; li += 1) {
+          var indexLine = lines[li]
+          if (!indexLine.trim()) continue
+          if (isNoteLine(indexLine)) result.notes.push({ cut: indexLine.indexOf('截断') >= 0, text: indexLine.trim() })
+          else result.lines.push(indexLine)
+        }
+        return result
+      }
+
+      // 整段 / 分段：按段头切，段内截断与尾注各归各位。
+      // 只把「后面全是注释」的括号行当尾注：正文里偶有一行以括号开头，不能因此把后半段吃掉。
+      function notesOnlyFrom(from) {
+        for (var t = from; t < lines.length; t += 1) {
+          var probe = lines[t].trim()
+          if (probe && !isNoteLine(probe)) return false
+        }
+        return true
+      }
+      var current = null
+      function closeSegment() {
+        if (!current) return
+        current.text = current.text.replace(/\n+$/, '')
+        result.segments.push(current)
+        current = null
+      }
+      for (var si = 0; si < lines.length; si += 1) {
+        var line = lines[si]
+        var section = /^--- #(\d+)(?: (.+?))? ---$/.exec(line)
+        if (section) {
+          closeSegment()
+          current = { no: Number(section[1]), label: section[2] || '', text: '', cut: null }
+          continue
+        }
+        var trimmed = line.trim()
+        // 段内截断：工具在段尾写「本段已截断」，正文切在那里，截断点单独标出来。
+        if (current && trimmed.indexOf('…（本段已截断：') === 0) {
+          var cut = /^…（本段已截断：原文 (\d+) 字，≈\d+ token，本次只返回前 (\d+) 字。需要完整内容请再按段召回。）$/.exec(trimmed)
+          if (cut) {
+            current.cut = { full: Number(cut[1]), kept: Number(cut[2]) }
+            closeSegment()
+            continue
+          }
+        }
+        if (isNoteLine(trimmed) && notesOnlyFrom(si + 1)) {
+          closeSegment()
+          result.notes.push({
+            cut: trimmed.indexOf('没取回') >= 0 || trimmed.indexOf('被截断') >= 0 || trimmed.indexOf('目录已截断') >= 0,
+            text: trimmed,
+          })
+          continue
+        }
+        if (!current) continue
+        current.text += (current.text ? '\n' : '') + line
+      }
+      closeSegment()
+      return result
+    }
+
+    function recallCutText(cut) {
+      return '✂ 单次上限切在这里：原文 ' + exactChars(cut.full) + '，本次只返回前 ' + exactChars(cut.kept) +
+        '；要完整内容就按这一段再召回。'
+    }
+
+    function RecallSegment(props) {
+      var opened = useLazyOpen()
+      var segment = props.segment || {}
+      var body = typeof segment.text === 'string' ? segment.text : ''
+      var cut = segment.cut || null
+      var head = '#' + segment.no + (segment.label ? ' [' + segment.label + ']' : '') + ' · ' + formatCharsTokens(body.length) +
+        (cut ? ' · 已截断' : '')
+      return h('details', { style: C.itemBox, onToggle: opened[1] },
+        h('summary', {
+          style: C.itemSummary,
+          // 切分点写在 title 里：收起时也能量出「原文多少、这次给了多少」。
+          title: cut ? '这一段超过单次召回上限：原文 ' + exactChars(cut.full) + '，本次只返回前 ' + exactChars(cut.kept) : undefined,
+        }, head),
+        opened[0]
+          ? h('div', { style: C.itemBody },
+              h('div', { style: Object.assign({}, C.blockText, props.wide ? C.blockWide : C.blockClip) }, body || '（空）'),
+              cut ? h('div', { style: CUT_STYLE }, recallCutText(cut)) : null
+            )
+          : null
+      )
+    }
+
+    function RecallResult(props) {
+      var parsed = props.parsed || {}
+      var opened = useLazyOpen()
+      var segments = Array.isArray(parsed.segments) ? parsed.segments : []
+      var notes = Array.isArray(parsed.notes) ? parsed.notes : []
+      var cuts = 0
+      var chars = 0
+      for (var i = 0; i < segments.length; i += 1) {
+        if (segments[i] && segments[i].cut) cuts += 1
+        chars += segments[i] && typeof segments[i].text === 'string' ? segments[i].text.length : 0
+      }
+      var segmentNos = []
+      if (parsed.kind !== 'index') {
+        for (var s = 0; s < segments.length; s += 1) if (segments[s]) segmentNos.push(segments[s].no)
+      }
+      // 目录形态的正文就是这些行：目录自己也占上下文，收起行要把它的字数与 token 一起给出来，
+      // 否则只写「目录 128 段」，看不出这一面墙有多大。
+      var indexLines = parsed.kind === 'index' && Array.isArray(parsed.lines) ? parsed.lines : []
+      var indexChars = 0
+      for (var il = 0; il < indexLines.length; il += 1) indexChars += String(indexLines[il] || '').length + 1
+      // 「召回 fN」单独成标签：这次工具调用取回了哪份折叠，是这一块最要紧的身份信息。
+      var headLead = '召回 ' + parsed.id
+      var head = ''
+      if (parsed.kind === 'parts') {
+        // 取回范围直接写进收起行：点了哪几段不必展开就能核对。
+        head = '分段取回 ' + parsed.picked + '/' + parsed.total + ' 段'
+        // 只列这次正文里真的出现的段号；因预算没取回的段由下面的尾注说明，不在这里凑数。
+        var ranges = compactRanges(segmentNos)
+        if (ranges) head += '（' + ranges + '）'
+      } else if (parsed.kind === 'direct') {
+        head = '整段取回 ' + segments.length + ' 段'
+      } else {
+        head = '分段目录 ' + (parsed.totalParts || 0) + ' 段（原文没有返回）'
+        if (indexLines.length > 0) head += ' · ' + formatCharsTokens(indexChars)
+      }
+      if (segments.length > 0) head += ' · ' + formatChars(chars)
+      if (cuts > 0) head += ' · ' + cuts + ' 段被截断'
+      var omitted = 0
+      for (var n = 0; n < notes.length; n += 1) {
+        var miss = /还有 (\d+) 段没取回/.exec(notes[n].text || '')
+        if (miss) omitted += Number(miss[1])
+      }
+      if (omitted > 0) head += ' · ' + omitted + ' 段没取回'
+      var children = []
+      if (parsed.kind === 'index') {
+        for (var l = 0; l < indexLines.length; l += 1) {
+          children.push(h('div', { key: 'l' + l, style: RECALL_LINE_STYLE }, indexLines[l]))
+        }
+      } else {
+        for (var s = 0; s < segments.length; s += 1) {
+          children.push(h(RecallSegment, { key: 's' + s, segment: segments[s], wide: props.wide }))
+        }
+      }
+      // 取回的段、目录行同样限高：一次分段召回可能取回几十段，展开后不该把页面拉长。
+      // 尾注留在框外——切分点与「还有 N 段没取回」是要紧信息，不能被滚走。
+      var listLimit = parsed.kind === 'index' ? LINE_SCROLL_AFTER : PART_SCROLL_AFTER
+      var body = children.length > listLimit
+        ? [h('div', {
+            key: 'list',
+            style: parsed.kind === 'index' ? C.scrollBoxTight : C.scrollBox,
+            title: children.length + ' 行，在框内滚动查看',
+          }, children)]
+        : children
+      for (var k = 0; k < notes.length; k += 1) {
+        body.push(h('div', {
+          key: 'n' + k,
+          style: notes[k].cut ? CUT_STYLE : RECALL_LINE_STYLE,
+        }, notes[k].text))
+      }
+      return h('details', { style: C.nested, onToggle: opened[1] },
+        h('summary', { style: Object.assign({}, C.nestedSummary, { opacity: 1 }), title: parsed.head || '' },
+          h('span', { style: Object.assign({}, C.tag, RECALL_TAG_STYLE, { marginRight: '6px' }) }, headLead),
+          h('span', { style: { opacity: 0.7 } }, head)
+        ),
+        opened[0] ? h('div', { style: C.nestedBody }, body) : null
+      )
+    }
+
     function BlockView(props) {
       var block = props.block || {}
       var kind = block.kind || 'text'
       var text = typeof block.text === 'string' ? block.text : ''
       var label = BLOCK_LABELS[kind] || '文本'
       if (kind === 'call' && block.name) label += ' ' + block.name
+      // fold_recall 的返回按段折起来：长原文不摊进 DOM，取回范围与切分点直接写在标题上。
+      var recall = useMemoHook
+        ? useMemoHook(function () { return kind === 'result' ? parseRecallResult(text) : null }, [text])
+        : kind === 'result' ? parseRecallResult(text) : null
+      if (recall) {
+        // 外层保留工具结果的底色与块头，内层才是可折叠的召回明细：块的归属不变，只是多收了一层。
+        return h('div', { style: Object.assign({}, tint(kind), C.blockBox) },
+          h('div', { style: C.blockHead }, label + ' · ' + formatCharsTokens(text.length)),
+          h(RecallResult, { parsed: recall, wide: props.wide })
+        )
+      }
       return h('div', { style: Object.assign({}, tint(kind), C.blockBox) },
         h('div', { style: C.blockHead }, label + ' · ' + formatCharsTokens(text.length)),
         h('div', { style: Object.assign({}, C.blockText, props.wide ? C.blockWide : C.blockClip) }, text || '（空）')
@@ -2940,6 +3167,11 @@ window.__ModuleLoader__.load({
       recallIndexLines: recallIndexLines,
       partRecallCount: partRecallCount,
       FoldItem: FoldItem,
+      parseRecallResult: parseRecallResult,
+      recallCutText: recallCutText,
+      RecallSegment: RecallSegment,
+      BlockView: BlockView,
+      RecallResult: RecallResult,
     }
     return module.exports
   },
