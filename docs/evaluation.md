@@ -109,7 +109,6 @@ node tools/eval.mjs --list
 
 - 顶栏「折叠 · 账本」：实时 token 收支、构成占比、趋势、逐轮成本。
 - 顶栏「折叠 · 模型视角」：模型实际看到的历史，检查点可展开对照原文。
-- `GET /fold-report?session=<id>`：逐轮 HTML 报告，带每段的召回次数与是否已固化。
 
 ---
 
