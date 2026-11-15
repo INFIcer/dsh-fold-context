@@ -395,3 +395,48 @@ test('校准系数被钳制在安全区间', () => {
   assert.equal(cost.calibration.promptScale, 0.02)
   assert.equal(cost.calibration.outputScale, 0.2)
 })
+
+test('分段目录与关键词检索也是插件额外首次上行，从折叠视角的未命中里单列', () => {
+  // 一次大折叠先只给目录（index），再取回段（parts）；另有一次关键词检索（search）。
+  // 三次都是 fold_recall 的工具结果，都是新写进上下文的内容：不折叠的基线里没有它们。
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 2, chars: 1200, checkpointChars: 200, unfoldedChars: 40000 }),
+  ]
+  const recalls = [
+    { id: 'f1', turn: 1, mode: 'index', tokens: 900 },
+    { id: 'f1', turn: 1, mode: 'parts', tokens: 800 },
+    { id: '', turn: 1, mode: 'search', tokens: 100 },
+  ]
+  const pins = [{ text: 'x'.repeat(400) }]
+  const cost = buildCost({ groups, folds: [], recalls, pins, config: { cacheHitRate: 1 } })
+  const row = cost.turns[0]
+  assert.equal(row.pluginOverhead.recall, 800, '取回的原文')
+  assert.equal(row.pluginOverhead.probe, 1000, '目录 900 + 检索 100')
+  assert.equal(row.pluginOverhead.pin, estimateChars(400))
+  assert.equal(row.pluginOverhead.total, row.pluginOverheadTokens)
+  // 合计与分项相等：没有漏算任何一笔，也没有重复计。
+  assert.equal(
+    cost.totals.pluginOverheadTokens,
+    cost.totals.pluginOverhead.recall + cost.totals.pluginOverhead.probe +
+      cost.totals.pluginOverhead.pin + cost.totals.pluginOverhead.checkpoint,
+  )
+  // 命中率为 1 时折叠视角的未命中只剩首次上行，基线正好少掉这一整笔。
+  assert.equal(row.unfoldedInputTokens, row.foldedInputTokens - row.pluginOverheadTokens)
+})
+
+test('上一轮检查点与目录分开报，都不漏进额外开销', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 1, chars: 400, checkpointChars: 400, unfoldedChars: 4000 }),
+    turn({ turn: 2, steps: 2, chars: 300, checkpointChars: 300, unfoldedChars: 3000 }),
+  ]
+  const recalls = [{ id: 'f1', turn: 2, mode: 'index', tokens: 500 }]
+  const cost = buildCost({ groups, folds: [], recalls, config: { cacheHitRate: 1 } })
+  const row = cost.turns[1]
+  assert.equal(row.pluginOverhead.checkpoint, estimateChars(400))
+  assert.equal(row.pluginOverhead.probe, 500)
+  assert.equal(cost.totals.pluginOverhead.checkpoint, estimateChars(400))
+  // 重要消息只在第一次出现时算一次额外开销，不会每轮再加。
+  assert.equal(cost.totals.pluginOverhead.pin, 0)
+})

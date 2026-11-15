@@ -230,6 +230,25 @@ test('成本提示只拿「归折叠管的部分」跟实测比，并点明两�
   assert.ok(noteFor(null).includes('要等本轮有一次模型调用'))
 })
 
+test('未命中说明把插件额外开销按来源拆开，分段目录单列', () => {
+  const { module } = loadClient()
+  const note = module.__test.missNote({
+    foldedInputTokens: 5000,
+    unfoldedInputTokens: 3200,
+    pluginOverhead: { checkpoint: 57, recall: 999, probe: 993, pin: 104 },
+  })
+  // 目录那 993 token 要单独出现，否则读者会以为「只给目录」没花成本。
+  assert.ok(note.includes('分段目录与检索 993'), note)
+  assert.ok(note.includes('召回原文 999'), note)
+  assert.ok(note.includes('检查点 57'), note)
+  assert.ok(note.includes('重要消息 104'), note)
+  assert.ok(note.includes('合计 1.8k token'), note)
+  // 没有分项时退回旧的笼统说法，不编数字。
+  const plain = module.__test.missNote({ foldedInputTokens: 400, unfoldedInputTokens: 100 })
+  assert.ok(plain.includes('检查点、固化消息、召回正文'), plain)
+  assert.ok(plain.includes('同样算在这笔未命中里'), plain)
+})
+
 test('成本参考：头部按 token 计，金额只作折算', () => {
   const { module } = loadClient()
   assert.equal(typeof module.__test.formatMoney, 'function')
@@ -322,6 +341,8 @@ test('账本头部只用 token 报收益，不出现人民币', () => {
     pins: 0, pinChars: 0, pinTokens: 0, netTokens: 90,
   }, { tokens: 0 })
   assert.ok(withProbes[1].hint.includes('5 次召回 + 3 次目录/检索'), withProbes[1].hint)
+  // 目录与检索只花 token、不返回原文，成本要算，页面得说清这一条。
+  assert.ok(withProbes[1].hint.includes('同样计入成本'), withProbes[1].hint)
 })
 
 // 收益与成本都不该再拿单价折成人民币：真实请求会被缓存、压缩器和工具定义改写。

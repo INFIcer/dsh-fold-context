@@ -321,7 +321,7 @@ window.__ModuleLoader__.load({
           label: '召回成本',
           value: (recall > 0 ? '−' : '') + formatTokens(recall) + ' token',
           color: recall > 0 ? '#f87171' : 'inherit',
-          hint: totals.recalls + ' 次召回' + (totals.probes > 0 ? ' + ' + totals.probes + ' 次目录/检索' : '') + '，' + totals.recalledFolds + ' 段被回看过',
+          hint: totals.recalls + ' 次召回' + (totals.probes > 0 ? ' + ' + totals.probes + ' 次目录/检索（同样计入成本）' : '') + '，' + totals.recalledFolds + ' 段被回看过',
         },
         {
           label: '重要消息成本',
@@ -452,12 +452,30 @@ window.__ModuleLoader__.load({
     // 未命中口径：两种视角都要为原文付一次首次上行；折叠视角还要多付
     // 检查点、固化消息、召回返回的正文——所以不折叠的未命中总是更小一截。
     // 折叠真正省的是命中档：前缀体积小 5 倍，重复部分才便宜。
+    // 多出来的那一截按来源拆开写：只报合计数时，读者分不出「分段目录」与「召回原文」各占多少，
+    // 而分段目录恰恰是最容易被误当成免费的那一笔——它是 fold_recall 的工具结果，同样按未命中计。
+    function overheadParts(totals) {
+      var overhead = totals && totals.pluginOverhead
+      if (!overhead) return []
+      var parts = []
+      if (overhead.checkpoint > 0) parts.push('检查点 ' + formatTokens(overhead.checkpoint))
+      if (overhead.recall > 0) parts.push('召回原文 ' + formatTokens(overhead.recall))
+      if (overhead.probe > 0) parts.push('分段目录与检索 ' + formatTokens(overhead.probe))
+      if (overhead.pin > 0) parts.push('重要消息 ' + formatTokens(overhead.pin))
+      return parts
+    }
+
     function missNote(totals) {
       var folded = totals && typeof totals.foldedInputTokens === 'number' ? totals.foldedInputTokens : 0
       var plain = totals && typeof totals.unfoldedInputTokens === 'number' ? totals.unfoldedInputTokens : 0
       var diff = Math.max(0, folded - plain)
-      return '未命中 = 内容首次上行的那一次。原文两种视角都要付一次；折叠多出检查点、固化消息、召回正文，'
-        + '累计 ' + formatTokens(diff) + ' token。折叠省的是命中档：前缀体积小，重复重发的部分按缓存价便宜一半多。'
+      var parts = overheadParts(totals)
+      var detail = parts.length > 0
+        ? parts.join('、') + '，合计 ' + formatTokens(diff) + ' token'
+        : '检查点、固化消息、召回正文，累计 ' + formatTokens(diff) + ' token'
+      return '未命中 = 内容首次上行的那一次。原文两种视角都要付一次；折叠多出的是插件自己写进上下文的内容：'
+        + detail + '。分段目录与关键词检索也是 fold_recall 的工具结果，同样算在这笔未命中里。'
+        + '折叠省的是命中档：前缀体积小，重复重发的部分按缓存价便宜一半多。'
     }
 
     // 折叠视角的重放量应该≈ provider 实测（同一份历史在每一步被重发），对不上就直接写差多少。
@@ -590,8 +608,15 @@ window.__ModuleLoader__.load({
               h('thead', {}, headCells(['轮', '步', '折叠后', '不折叠', '净省 token', '实际输入'])),
               h('tbody', {}, rows.map(function (row) {
                 var rowSaved = row.netSavedTokens || 0
+                // 逐轮把插件额外开销拆在提示里：合计数看不出「取目录」也算了一笔，拆开才查得动账。
+                var overhead = row.pluginOverhead
+                var overheadTitle = overhead && overhead.total > 0
+                  ? '第 ' + row.turn + ' 轮插件额外首次上行：检查点 ' + formatTokens(overhead.checkpoint || 0) +
+                    '、召回原文 ' + formatTokens(overhead.recall || 0) +
+                    '（其中分段目录与检索 ' + formatTokens(overhead.probe || 0) + '）、重要消息 ' + formatTokens(overhead.pin || 0)
+                  : undefined
                 return h('tr', { key: 'c' + row.turn },
-                  h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.turn === null ? '?' : row.turn)),
+                  h('td', { style: Object.assign({}, C.td, C.mono), title: overheadTitle }, String(row.turn === null ? '?' : row.turn)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.steps || 1)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, formatTokens(row.foldedTokens)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, formatTokens(row.unfoldedTokens)),
@@ -3138,6 +3163,7 @@ window.__ModuleLoader__.load({
       entryKindOf: entryKindOf,
       costDriftNote: costDriftNote,
       calibrationNote: calibrationNote,
+      missNote: missNote,
       CostSection: CostSection,
       ledgerKpis: ledgerKpis,
       formatMoney: formatMoney,
