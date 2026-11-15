@@ -325,8 +325,6 @@ test('fold_config 拒绝未知键，get 里能看到分级召回的字段', asyn
 
 test('折叠摘要带文件清单，关键词检索能把这一轮找回来', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
-  // 本用例要断言 read/edit 被折掉后留下的「· 文件：」行，所以关掉文件读写保护，让它们照常折叠。
-  writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ keepTools: '', keepPaths: '', keepFileOps: false }), 'utf8')
   const ctx = makeCtx()
   const api = assemble(ctx, { homeDir, logFile: null })
   const session = new FakeSession('sess-files')
