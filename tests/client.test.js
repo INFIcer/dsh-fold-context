@@ -378,3 +378,16 @@ test('折叠原文面板与召回同形：整段/目录两种形态与目录行�
   assert.ok(lines[1].startsWith('#2 [调用 read] '))
   assert.ok(lines[0].length < 60)
 })
+
+test('客户端分段与召回同规则：长 markdown 回复按标题切段', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  const md = '## 结论\n' + 'a'.repeat(120) + '\n## 改动\n' + 'b'.repeat(120)
+  const record = { items: [{ seq: 1, blocks: [{ kind: 'reply', text: '[回复] ' + md }] }] }
+  assert.equal(t.foldPartsOf(record).length, 1)
+  const split = t.foldPartsOf(record, { replySplitChars: 100 })
+  assert.equal(split.length, 2)
+  assert.equal(split[0].kind, 'reply')
+  assert.ok(split[0].text.startsWith('[回复] ## 结论'), split[0].text)
+  assert.equal(split[0].chars, ('## 结论\n' + 'a'.repeat(120)).length)
+})

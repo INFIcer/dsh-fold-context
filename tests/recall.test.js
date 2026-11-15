@@ -159,3 +159,32 @@ test('回复完整写入检查点时，召回不再返回回复段', () => {
   assert.ok(describeFold(record({ replyTruncated: true })).includes('[回复] 开始搬'))
   assert.deepEqual(foldParts(record()).map((part) => part.kind), ['think', 'reply', 'call', 'result'])
 })
+
+test('长 markdown 回复超过召回额度时按标题切段，短回复仍整段', () => {
+  const md = '## 结论\n' + 'a'.repeat(120) + '\n## 改动\n' + 'b'.repeat(120) + '\n## 验证\n' + 'c'.repeat(120)
+  const rec = { kind: 'fold', id: 'f8', turn: 3, items: [{ seq: 1, text: '[回复] ' + md }] }
+  // 阈值就是单次召回额度：不传时保持原有的整段召回。
+  assert.equal(foldParts(rec).length, 1)
+  const split = foldParts(rec, { replySplitChars: 100 })
+  assert.deepEqual(split.map((part) => part.no), [1, 2, 3])
+  assert.deepEqual(split.map((part) => part.kind), ['reply', 'reply', 'reply'])
+  assert.ok(split[0].text.startsWith('[回复] ## 结论'), split[0].text)
+  assert.equal(split[0].chars, ('## 结论\n' + 'a'.repeat(120)).length)
+
+  const index = buildFoldIndex(rec, { parts: split, previewChars: 12 })
+  assert.match(index, /共 3 段/)
+  assert.match(index, /#1 \[回复\]/)
+  assert.match(index, /## 结论/)
+  assert.match(index, /#3 \[回复\]/)
+})
+
+test('标题前的导语单独成段；未截断的回复不参与切段', () => {
+  const md = '前言\n\n## 甲\n' + 'a'.repeat(120) + '\n## 乙\n' + 'b'.repeat(120)
+  const rec = { kind: 'fold', id: 'f9', turn: 4, items: [{ seq: 1, text: '[回复] ' + md }] }
+  const parts = foldParts(rec, { replySplitChars: 100 })
+  assert.equal(parts.length, 3)
+  assert.equal(parts[0].chars, '前言'.length)
+  assert.ok(parts[0].text.startsWith('[回复] 前言'))
+  // 检查点里已完整保留回复时不返回回复段，也就没有切段。
+  assert.deepEqual(foldParts({ ...rec, replyTruncated: false }, { replySplitChars: 100 }), [])
+})

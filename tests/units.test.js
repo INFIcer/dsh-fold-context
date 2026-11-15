@@ -107,6 +107,24 @@ test('一轮多次回复：检查点覆盖全部回复，不再误标为完整�
   assert.ok(whole.text.includes('甲 乙'), whole.text)
 })
 
+test('长 markdown 回复按标题摘要，短回复仍整段保留', () => {
+  const long = '## 结论\n' + '甲'.repeat(80) + '\n## 改动\n' + '乙'.repeat(80) + '\n## 验证\n' + '丙'.repeat(80)
+  const stats = statsOf([assistantNode(2, { text: long })])
+  const { text: note, replyTruncated } = buildNoteEx({ foldId: 'f11', turn: 11, stats, maxTokens: 20, toolName: 'fold_recall' })
+  assert.equal(replyTruncated, true)
+  assert.ok(note.includes('按标题摘要（3 个标题）'), note)
+  assert.ok(note.includes('## 结论 / ## 改动 / ## 验证'), note)
+  // 标题摘要里不带正文：正文仍要靠召回去拿。
+  assert.ok(!note.includes('甲'.repeat(80)), note)
+  assert.ok(!note.includes('开头「'), note)
+
+  const short = statsOf([assistantNode(3, { text: '## 甲\n内容\n## 乙\n更多' })])
+  const whole = buildNoteEx({ foldId: 'f12', turn: 12, stats: short, maxTokens: 50, toolName: 'fold_recall' })
+  assert.equal(whole.replyTruncated, false)
+  assert.ok(whole.text.includes('· 回复：## 甲 内容 ## 乙 更多'), whole.text)
+  assert.ok(!whole.text.includes('按标题摘要'), whole.text)
+})
+
 test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
   assert.equal(isKeeper(userNode(1, 'hi', 'user')), true)
   assert.equal(isKeeper(userNode(1, 'hi', 'fold-pin')), true)

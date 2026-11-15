@@ -748,8 +748,56 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 回复的 markdown 标题：与 lib/markdown.js 同一套规则（ATX 标题、跳过代码块、至少两个标题）。
+    // 只用在「需要分段」的长回复上；短回复仍整段展示，和召回行为一致。
+    function headingLines(text) {
+      var lines = String(text === null || text === undefined ? '' : text).split('\n')
+      var out = []
+      var fence = ''
+      for (var i = 0; i < lines.length; i += 1) {
+        var line = lines[i]
+        var fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+        if (fenceMatch) {
+          var mark = fenceMatch[1]
+          var rest = fenceMatch[2].trim()
+          if (!fence) fence = mark
+          else if (rest === '' && mark.charAt(0) === fence.charAt(0) && mark.length >= fence.length) fence = ''
+          continue
+        }
+        if (fence) continue
+        var heading = line.match(/^ {0,3}(#{1,6})(?:[ \t\u3000]+(.*?))?[ \t\u3000]*$/)
+        if (!heading) continue
+        var title = String(heading[2] || '').replace(/[ \t\u3000]+#+[ \t\u3000]*$/, '').trim()
+        if (!title) continue
+        out.push({ line: i, title: title })
+      }
+      return out
+    }
+
+    function splitReplySections(text) {
+      var value = String(text === null || text === undefined ? '' : text)
+      var lines = value.split('\n')
+      var headings = headingLines(value)
+      if (headings.length < 2) return null
+      var sections = []
+      if (headings[0].line > 0) {
+        var intro = lines.slice(0, headings[0].line).join('\n').trim()
+        if (intro) sections.push(intro)
+      }
+      for (var i = 0; i < headings.length; i += 1) {
+        var from = headings[i].line
+        var to = i + 1 < headings.length ? headings[i + 1].line : lines.length
+        var body = lines.slice(from, to).join('\n').replace(/[ \t\n]+$/, '')
+        if (body) sections.push(body)
+      }
+      return sections
+    }
+
     // 折叠原文按召回时的形态展示：整段够小就直接给全文，超过就先给目录（与 fold_recall 一致）。
-    function foldPartsOf(record) {
+    // 长 markdown 回复按标题切段，UI 里的段号才能和实际召回对得上。
+    function foldPartsOf(record, options) {
+      var settings = options || {}
+      var splitChars = typeof settings.replySplitChars === 'number' && settings.replySplitChars > 0 ? settings.replySplitChars : 0
       var items = Array.isArray(record && record.items) ? record.items : []
       var parts = []
       for (var i = 0; i < items.length; i += 1) {
@@ -758,7 +806,22 @@ window.__ModuleLoader__.load({
         for (var j = 0; j < blocks.length; j += 1) {
           var block = blocks[j] || {}
           var text = typeof block.text === 'string' ? block.text : ''
-          parts.push({ no: parts.length + 1, seq: item.seq, kind: block.kind || 'text', name: block.name || '', text: text, chars: text.length })
+          var kind = block.kind || 'text'
+          // 记录里的回复正文带 '[回复] ' 前缀；切节前先摘掉，否则第一行标题被前缀挡住，标题就少一个。
+          var body = text
+          var prefix = ''
+          if (kind === 'reply' && text.indexOf('[回复] ') === 0) {
+            prefix = '[回复] '
+            body = text.slice(prefix.length)
+          }
+          var sections = kind === 'reply' && splitChars > 0 && body.length > splitChars ? splitReplySections(body) : null
+          if (sections) {
+            for (var k = 0; k < sections.length; k += 1) {
+              parts.push({ no: parts.length + 1, seq: item.seq, kind: kind, name: block.name || '', text: prefix + sections[k], chars: sections[k].length })
+            }
+            continue
+          }
+          parts.push({ no: parts.length + 1, seq: item.seq, kind: kind, name: block.name || '', text: text, chars: text.length })
         }
       }
       return parts
@@ -782,7 +845,8 @@ window.__ModuleLoader__.load({
       var settings = config || {}
       var directTokens = typeof settings.recallDirectTokens === 'number' && settings.recallDirectTokens > 0 ? settings.recallDirectTokens : 500
       var previewTokens = typeof settings.recallIndexPreviewTokens === 'number' && settings.recallIndexPreviewTokens > 0 ? settings.recallIndexPreviewTokens : 25
-      var parts = foldPartsOf(record)
+      var maxRecallTokens = typeof settings.maxRecallTokens === 'number' && settings.maxRecallTokens > 0 ? settings.maxRecallTokens : 1000
+      var parts = foldPartsOf(record, { replySplitChars: maxRecallTokens * 4 })
       var chars = parts.reduce(function (sum, part) { return sum + part.chars }, 0)
       var tokens = Math.round(chars / 4)
       return { parts: parts, chars: chars, tokens: tokens, direct: tokens <= directTokens, directLimit: directTokens, previewChars: previewTokens * 4 }
