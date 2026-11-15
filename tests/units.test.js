@@ -561,28 +561,55 @@ test('buildNote 的长度上限只约束回复行，元信息不被截断', () =
 test('ConfigStore 只把显式改过的键写进文件层，profile 的其它值不被冻结', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
   const store = new ConfigStore({ homeDir, log: silent })
-  store.load({ minFoldTokens: 900 })
-  assert.equal(store.get().minFoldTokens, 900)
+  store.load({ maxRecallTokens: 1200 })
+  assert.equal(store.get().maxRecallTokens, 1200)
 
   const saved = store.save({ maxNoteTokens: 400 })
   assert.equal(saved.maxNoteTokens, 400)
   const raw = JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8'))
   assert.equal(raw.maxNoteTokens, 400)
-  // 早先把合并后的 current 整份写盘，profile 的 900 会被冻结进文件，之后改 profile 永远不生效。
-  assert.equal(raw.minFoldTokens, undefined, 'profile 的值不写进文件')
+  // 早先把合并后的 current 整份写盘，profile 的 1200 会被冻结进文件，之后改 profile 永远不生效。
+  assert.equal(raw.maxRecallTokens, undefined, 'profile 的值不写进文件')
 
   const again = new ConfigStore({ homeDir, log: silent })
-  const loaded = again.load({ minFoldTokens: 300 })
-  assert.equal(loaded.minFoldTokens, 300, 'profile 改了，文件没覆盖这个键，就跟着 profile 走')
+  const loaded = again.load({ maxRecallTokens: 800 })
+  assert.equal(loaded.maxRecallTokens, 800, 'profile 改了，文件没覆盖这个键，就跟着 profile 走')
   assert.equal(loaded.maxNoteTokens, 400)
 
   // reset 必须是「显式写入默认值」：只清文件层的话，重启后 profile 又把它盖回去。
   again.reset()
-  assert.equal(again.get().minFoldTokens, 300)
+  assert.equal(again.get().maxRecallTokens, 1000)
   const resetRaw = JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8'))
-  assert.equal(resetRaw.minFoldTokens, 300)
+  assert.equal(resetRaw.maxRecallTokens, 1000)
   const third = new ConfigStore({ homeDir, log: silent })
-  assert.equal(third.load({ minFoldTokens: 300 }).minFoldTokens, 300, '默认值压过 profile')
+  assert.equal(third.load({ maxRecallTokens: 800 }).maxRecallTokens, 1000, '默认值压过 profile')
+})
+
+test('文本默认值随代码升级：文件里的默认文案换回当前默认值，自定义文案不受影响', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const file = join(homeDir, 'fold-config.json')
+  const defaults = defaultConfig()
+
+  const store = new ConfigStore({ homeDir, log: silent })
+  store.load({})
+  store.reset()
+  const raw = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(raw.systemPromptText, defaults.systemPromptText)
+  assert.ok(raw._fromCodeDefault.includes('systemPromptText'), '默认文案要被记成派生值')
+
+  // 模拟「文件里留着旧版本默认文案，代码已经升级」：清单说它当初等于默认值。
+  raw.systemPromptText = '旧版本的默认文案'
+  writeFileSync(file, JSON.stringify(raw, null, 2), 'utf8')
+  const loaded = new ConfigStore({ homeDir, log: silent }).load({ systemPromptText: 'profile 里的旧文案' })
+  assert.equal(loaded.systemPromptText, defaults.systemPromptText, '跟随当前默认值，并压过 profile')
+
+  // 用户自己写过的文案不等于默认值，不进清单，重启后保持原样。
+  store.save({ systemPromptText: '自定义文案' })
+  const custom = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(custom._fromCodeDefault.includes('systemPromptText'), false)
+  assert.equal(custom.systemPromptText, '自定义文案')
+  const kept = new ConfigStore({ homeDir, log: silent }).load({})
+  assert.equal(kept.systemPromptText, '自定义文案')
 })
 
 test('validateConfigPatch 只收白名单键，且逐项拒绝非法值', () => {
