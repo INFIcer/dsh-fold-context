@@ -134,11 +134,13 @@ test('目录与检索照算成本，但不算内容召回', () => {
   assert.ok(stats.totals.recallMoney > 0)
 })
 
-test('重要消息 = 首次未命中 + 之后每步按命中价常驻', () => {
+test('重要消息在轮末注入：同轮不计半步，后续轮次按命中价常驻', () => {
   const pinText = 'c'.repeat(100)
   const records = [
     fold('f1', 1, 'a'.repeat(400), 'b'.repeat(40), { usage: { steps: 2 } }),
     { kind: 'pin', id: 'P', turn: 1, at: 2001, text: pinText },
+    // 重要消息在轮末才进上下文：同轮那 2 个请求根本没带它，不能按半步算。
+    fold('f2', 2, 'a'.repeat(400), 'b'.repeat(40), { usage: { steps: 2 } }),
   ]
   const stats = buildStats({ records, config: {} })
   const row = stats.pins[0]
@@ -147,9 +149,9 @@ test('重要消息 = 首次未命中 + 之后每步按命中价常驻', () => {
   const tokens = estimateTokens([full])
   assert.equal(row.chars, full.length)
   assert.equal(row.tokens, tokens)
-  // 第 1 轮 2 步：重要消息写在轮内，之后还有半步（(2-1)/2）会重发它；轮后没有请求。
-  assert.equal(row.requests, 0.5)
-  assert.equal(row.pinMoney, roundMoney((tokens * 1 + tokens * 0.5 * 0.02) / 1e6))
+  // 第 2 轮 2 步请求都带着它；第 1 轮轮内那 2 步早于注入，不算。
+  assert.equal(row.requests, 2)
+  assert.equal(row.pinMoney, roundMoney((tokens * 1 + tokens * 2 * 0.02) / 1e6))
 })
 
 test('buildStats 标记被压缩卷走的 pin，并从当前常驻里扣掉', () => {

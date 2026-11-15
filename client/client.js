@@ -780,7 +780,7 @@ window.__ModuleLoader__.load({
 
     function recallPlan(record, config) {
       var settings = config || {}
-      var directTokens = typeof settings.recallDirectTokens === 'number' && settings.recallDirectTokens > 0 ? settings.recallDirectTokens : 2000
+      var directTokens = typeof settings.recallDirectTokens === 'number' && settings.recallDirectTokens > 0 ? settings.recallDirectTokens : 500
       var previewTokens = typeof settings.recallIndexPreviewTokens === 'number' && settings.recallIndexPreviewTokens > 0 ? settings.recallIndexPreviewTokens : 25
       var parts = foldPartsOf(record)
       var chars = parts.reduce(function (sum, part) { return sum + part.chars }, 0)

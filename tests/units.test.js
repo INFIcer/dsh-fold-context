@@ -6,7 +6,7 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { buildNote, filesOfToolCall, isKeeper, noteFilesLine, recallItems, shortPath, statsOf, totalChars } from '../lib/fold-text.js'
+import { buildNote, buildNoteEx, filesOfToolCall, isKeeper, noteFilesLine, recallItems, shortPath, statsOf, totalChars } from '../lib/fold-text.js'
 import { planSegments } from '../lib/plan.js'
 import { foldTurn, publishPin } from '../lib/commit.js'
 import { FoldStore, safeFileName } from '../lib/store.js'
@@ -21,6 +21,7 @@ import {
 import { promptSection, systemPromptText } from '../lib/prompt.js'
 import { moneyOf, pricesOf, roundMoney, yuanOf } from '../lib/pricing.js'
 import {
+  foldParts,
   matchFoldPartNumbers,
   normalizeQuery,
   renderSearchResults,
@@ -80,6 +81,30 @@ test('maxNoteTokens 调大后预览随之变长，且不重复展示', () => {
   // 600 上限大于回复本身：整段原样保留，且不再标字数（标了像被截断过）。
   assert.equal(preview(large), 'y'.repeat(500))
   assert.ok(!large.includes('回复约'), large)
+})
+
+test('一轮多次回复：检查点覆盖全部回复，不再误标为完整保留', () => {
+  // 第一条回复短、最后一条长：旧实现只看 stats.head，会返回 replyTruncated=false，
+  // 召回据此跳过所有回复段，最终结论就永远取不回来了。
+  const nodes = [
+    assistantNode(2, { text: '先说明一下' }),
+    toolNode(3, 'c1', '工具输出'),
+    assistantNode(4, { text: '最终结论' + '。'.repeat(300) }),
+  ]
+  const stats = statsOf(nodes)
+  const { text, replyTruncated } = buildNoteEx({ foldId: 'f9', turn: 9, stats, maxTokens: 20, toolName: 'fold_recall' })
+  assert.equal(replyTruncated, true)
+  assert.ok(text.includes('先说明一下'), text)
+  assert.ok(text.includes('回复约'), text)
+  // 截断标注必须让召回真的返回回复段，否则等于把最终回复弄丢。
+  const record = { id: 'f9', turn: 9, replyTruncated, items: recallItems(nodes, Number.MAX_SAFE_INTEGER) }
+  assert.ok(foldParts(record).some((part) => part.kind === 'reply'))
+
+  // 两段都短时拼在一起完整保留，并明确标成未截断。
+  const short = statsOf([assistantNode(5, { text: '甲' }), toolNode(6, 'c2', 'x'), assistantNode(7, { text: '乙' })])
+  const whole = buildNoteEx({ foldId: 'f10', turn: 10, stats: short, maxTokens: 50, toolName: 'fold_recall' })
+  assert.equal(whole.replyTruncated, false)
+  assert.ok(whole.text.includes('甲 乙'), whole.text)
 })
 
 test('isKeeper 只放行用户原话、重要消息与上一次摘要', () => {
@@ -263,6 +288,45 @@ test('publishPin 默认不设条数与长度上限，软上限只提示不拒绝
   assert.equal(clipped.ok, true)
   assert.ok(clipped.chars <= 41, '截断后是 40 字加省略号')
   assert.ok(clipped.note.includes('截断'))
+})
+
+test('publishPin 交给宿主投递时，账本等消息真的写进会话后才落', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const session = new FakeSession('sess-pin-queue')
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+  const queued = []
+  const result = publishPin({
+    session,
+    label: '接口约定',
+    text: '字段同名同义',
+    config: normalizeConfig({}),
+    store,
+    log: silent,
+    onPublish: (pin) => queued.push(pin),
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.pins, 1)
+  assert.equal(queued.length, 1)
+  assert.equal(queued[0].label, '接口约定')
+  // 消息还没投递：会话与账本都不该先出现它，否则投递失败会留下幽灵记录。
+  assert.equal(session.events.length, 0)
+  assert.equal(store.pins().length, 0)
+  assert.equal(store.append(queued[0].record), true)
+  assert.equal(store.pins().length, 1)
+
+  // 同名重发会覆盖旧记录，条数不变；返回值也不能把新旧两条都算进去。
+  const again = publishPin({
+    session,
+    label: '接口约定',
+    text: '改了个说法',
+    config: normalizeConfig({}),
+    store,
+    log: silent,
+    onPublish: (pin) => queued.push(pin),
+  })
+  assert.equal(again.ok, true)
+  assert.equal(again.pins, 1)
+  assert.equal(store.pins().length, 1)
 })
 
 test('FoldStore 忽略半行、按会话隔离、能统计召回次数', () => {
@@ -855,6 +919,17 @@ test('FoldStore 超过上限时清理最旧的折叠、保留 pin，并记住被
   assert.equal(store.isPruned('f1'), true)
   store.append({ kind: 'pin', id: 'P', text: '别丢' })
   assert.equal(store.pins().length, 1)
+
+  // 第二次清理要把上一批被清理的编号一起写进 prune 记录，否则重启后只认识最后一批，
+  // 更早的 f1 会被当成「从来没有过」，召回提示就错了。
+  store.append(big('f3', 3))
+  assert.equal(store.isPruned('f1'), true)
+  assert.equal(store.isPruned('f2'), true)
+  const reloaded = new FoldStore({ homeDir, sessionId: 'cap', maxChars: 4000 })
+  assert.equal(reloaded.isPruned('f1'), true)
+  assert.equal(reloaded.isPruned('f2'), true)
+  assert.equal(reloaded.findFold('f3') !== undefined, true, '最新一条必须保留')
+  assert.equal(reloaded.pins().length, 1)
 })
 
 test('上次写到一半的末行不会把新记录接坏', () => {
