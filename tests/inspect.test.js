@@ -1,19 +1,14 @@
-// 可视化报告的单元测试：喂假的派生消息与 fold 记录，覆盖统计、还原、HTML 与写盘。
+// 报告模型的单元测试：喂假的派生消息与 fold 记录，覆盖统计、还原与告警。
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 
 import {
-  buildHtmlReport,
   buildReportModel,
   buildTextReport,
   collectRecords,
   reconstructUnfolded,
   summarizeModelView,
-  writeReport,
 } from '../lib/inspect.js'
 import { estimateMessageTokens } from '../lib/tokens.js'
 
@@ -168,9 +163,6 @@ test('轮次号取会话轮次：同一轮被 steering 切开时标续接，未�
   assert.equal(groups[1].continuation, true)
   assert.equal(groups[2].turn, 2)
   assert.equal(groups[2].continuation, false)
-
-  const html = buildHtmlReport(model)
-  assert.ok(html.indexOf('轮内续接') >= 0)
 })
 
 test('插件生效前的未折叠轮次按第一个折叠轮次向前回填编号', () => {
@@ -247,22 +239,6 @@ test('显式的 pin.foldId 直接算固化，不吃归因推测', () => {
   assert.equal(f1.pinned, false)
 })
 
-test('buildHtmlReport 产出单文件中文报告，不引用外部资源', () => {
-  const model = demoModel()
-  const html = buildHtmlReport(model)
-  const labels = ['概览', '折叠后', '不折叠', '节省', '事件时间线', '按轮对比', '折叠段明细', '逐轮历史', '折叠摘要', '用户原话', '召回', '重要消息', '部署路径', '未固化']
-  for (const label of labels) {
-    assert.ok(html.indexOf(label) >= 0, '缺少标签：' + label)
-  }
-  assert.ok(html.indexOf('<style>') >= 0)
-  assert.ok(html.indexOf('<script>') >= 0)
-  assert.ok(html.indexOf('http://') < 0)
-  assert.ok(html.indexOf('https://') < 0)
-  assert.ok(html.indexOf('<script src') < 0)
-  assert.ok(html.indexOf('<link ') < 0)
-  assert.ok(html.indexOf('charset="utf-8"') >= 0)
-})
-
 test('buildTextReport 是 2000 字以内的摘要', () => {
   const model = demoModel()
   const text = buildTextReport(model)
@@ -272,17 +248,6 @@ test('buildTextReport 是 2000 字以内的摘要', () => {
   assert.ok(text.indexOf('f1') >= 0)
   const tight = buildTextReport(model, { maxChars: 200 })
   assert.ok(tight.length <= 200)
-})
-
-test('writeReport 真的在 fold-debug 目录写出 HTML', () => {
-  const homeDir = mkdtempSync(join(tmpdir(), 'fold-report-'))
-  const html = '<!DOCTYPE html><html><body>ok</body></html>'
-  const filePath = writeReport(homeDir, { sessionId: 'sess/demo', html })
-  assert.equal(existsSync(filePath), true)
-  assert.ok(filePath.endsWith('.html'))
-  assert.ok(filePath.indexOf('fold-debug') >= 0)
-  assert.ok(filePath.indexOf('sess_demo') >= 0)
-  assert.equal(readFileSync(filePath, 'utf8'), html)
 })
 
 test('旧版系统提示只留作参考，从模型视角总量里扣掉', () => {

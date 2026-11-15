@@ -9,7 +9,7 @@ const clientFile = join(here, '..', 'client', 'client.js')
 
 // 客户端 bundle 是被浏览器模块加载器接管的 CJS：这里用最小假件把它当普通模块跑起来，
 // 只验证注册面（顶栏 View 与插件页配置位），不验证渲染结果。
-function loadClient() {
+function loadClient(options = {}) {
   const source = readFileSync(clientFile, 'utf8')
   let definition
   const fakeWindow = {
@@ -17,12 +17,22 @@ function loadClient() {
       load(next) { definition = next },
     },
   }
+  // states：按顺序给每个 useState 喂初值，用来把一页真实数据摊开渲染。
+  let cursor = 0
   const react = {
     createElement(type, props) {
       const children = Array.prototype.slice.call(arguments, 2)
       return { type, props: props || {}, children }
     },
-    useState(value) { return [value, function () {}] },
+    // open 让展开态可测：收起态是默认值，展开态才看得到 details 的正文。
+    useState(value) {
+      if (options.states) {
+        const next = options.states[cursor]
+        cursor += 1
+        return [next === undefined ? value : next, function () {}]
+      }
+      return [options.open === true ? true : value, function () {}]
+    },
     useEffect() {},
     useRef(value) { return { current: value } },
     Fragment: 'fragment',
@@ -55,6 +65,22 @@ function fakeCtx() {
   }
   return { ctx, injected, registered }
 }
+
+test('折叠页顶栏：粘性标题条、两个标签页，且不再有逐轮报告与手动刷新', () => {
+  // 顶栏要冻在视口上沿；账本与模型视角各一个标签；过时的 HTML 报告入口与冗余的刷新按钮都删掉了。
+  const { module } = loadClient({
+    states: ['ledger', { text: '更新于 12:00:00 · 每 5 秒自动刷新', error: '' }, false, { status: 'loading', data: null, error: '', at: 0 }],
+  })
+  const json = JSON.stringify(module.__test.FoldStatsView({ sessionId: 's1' }))
+  assert.ok(json.includes('"position":"sticky"'), '顶栏要 sticky')
+  assert.ok(json.includes('"top":0'), '顶栏要贴住视口上沿')
+  assert.ok(json.includes('上下文折叠'), '要有标题')
+  assert.ok(json.includes('更新于 12:00:00'), '「更新于」应当由当前标签页回填到顶栏')
+  assert.ok(json.includes('账本') && json.includes('模型视角'), '两个标签页都要在')
+  assert.equal(json.includes('逐轮报告'), false)
+  assert.equal(json.includes('/fold-report'), false)
+  assert.equal(json.includes('"刷新"'), false)
+})
 
 test('客户端 bundle 声明 id 与 slots 依赖', () => {
   const { definition, module } = loadClient()

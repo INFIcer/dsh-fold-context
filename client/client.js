@@ -99,13 +99,31 @@ window.__ModuleLoader__.load({
     }
 
     var C = {
-      panel: { display: 'flex', flexDirection: 'column', gap: '14px', padding: '18px 22px 32px', minHeight: '100%', boxSizing: 'border-box' },
+      panel: { display: 'flex', flexDirection: 'column', gap: '14px', padding: '0 22px 32px', minHeight: '100%', boxSizing: 'border-box' },
       row: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' },
       title: { fontSize: '15px', fontWeight: 600, lineHeight: '22px' },
       sub: { fontSize: '12px', opacity: 0.62, lineHeight: '18px' },
-      tabBar: { display: 'flex', gap: '2px', borderBottom: '1px solid rgba(128,128,128,.25)' },
-      tab: { fontSize: '12px', padding: '7px 14px', border: 'none', borderBottom: '2px solid transparent', background: 'transparent', color: 'inherit', opacity: 0.6, cursor: 'pointer' },
+      // 顶栏贴住视口上沿：横向用负边距吃掉面板留白，底色不透明才遮得住滑过去的正文。
+      // 宿主把对话内容放在 overflow:auto 的滚动容器里，这里只负责在容器内粘住，不改宿主的布局。
+      header: {
+        position: 'sticky',
+        top: 0,
+        zIndex: 20,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        margin: '0 -22px',
+        padding: '14px 22px 0',
+        background: 'var(--dsw-alias-bg-base, #1b1d21)',
+        borderBottom: '1px solid rgba(128,128,128,.22)',
+      },
+      headerTop: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' },
+      headerMeta: { marginLeft: 'auto', fontSize: '11px', opacity: 0.55, fontVariantNumeric: 'tabular-nums' },
+      headerMetaError: { color: '#f87171', opacity: 1 },
+      tabRow: { display: 'flex', alignItems: 'flex-end' },
+      tab: { fontSize: '13px', padding: '7px 1px', marginRight: '20px', border: 'none', borderBottom: '2px solid transparent', background: 'transparent', color: 'inherit', opacity: 0.62, cursor: 'pointer' },
       tabActive: { opacity: 1, borderBottomColor: '#34d399', fontWeight: 600 },
+      tabHint: { marginLeft: 'auto', fontSize: '11px', opacity: 0.42, paddingBottom: '7px' },
       card: { border: '1px solid rgba(128,128,128,.28)', borderRadius: '10px', padding: '10px 12px', minWidth: '0' },
       kpiLabel: { fontSize: '12px', opacity: 0.65, marginBottom: '4px' },
       kpiValue: { fontSize: '20px', fontWeight: 600, fontVariantNumeric: 'tabular-nums', lineHeight: '26px' },
@@ -127,6 +145,10 @@ window.__ModuleLoader__.load({
       mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontVariantNumeric: 'tabular-nums' },
       button: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.4)', background: 'transparent', color: 'inherit', cursor: 'pointer' },
       notice: { fontSize: '12px', opacity: 0.7, padding: '12px 14px', border: '1px dashed rgba(128,128,128,.35)', borderRadius: '10px', lineHeight: '20px' },
+      // 口径说明是「查账时才会读」的参考文字：收进一条折叠行，别让七段小字压在账本上。
+      notesBox: { margin: '10px 0 2px', border: '1px solid rgba(128,128,128,.18)', borderRadius: '8px', padding: '2px 10px 4px' },
+      notesSummary: { fontSize: '11px', opacity: 0.62, cursor: 'pointer', listStyle: 'none', padding: '4px 0' },
+      noteLine: { fontSize: '11px', opacity: 0.62, lineHeight: '18px', margin: '4px 0 0' },
       pinLine: { padding: '6px 0', borderTop: '1px solid rgba(128,128,128,.14)', fontSize: '12px' },
       turn: { border: '1px solid rgba(128,128,128,.22)', borderRadius: '10px', overflow: 'hidden' },
       turnSummary: { padding: '8px 12px', cursor: 'pointer', listStyle: 'none' },
@@ -531,12 +553,16 @@ window.__ModuleLoader__.load({
           h('div', { style: C.sub }, priceLine(prices) + ' · 折叠收益以 token 计，金额只是同一批 token 的折算参考')
         ),
         kpis,
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '金额不是收益：同一批 token 换成高峰价就翻倍，真实请求还会被缓存与请求期压缩器改写。这里只回答「这些 token 按当前单价折算是多少」；「实测」那一栏才是 provider 回报的真实计费。'),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, calibrationNote(cost)),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, costDriftNote(cost.drift)),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, missNote(totals)),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。'),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, estimateVsActualNote(cost)),
+        // 六条口径说明每年看两次：收进折叠行，账本主体只剩数字与表。
+        h('details', { style: C.notesBox },
+          h('summary', { style: C.notesSummary }, '口径与校准说明：金额不是收益、未命中怎么算、估算与实测差多少'),
+          h('div', { style: C.noteLine }, '金额不是收益：同一批 token 换成高峰价就翻倍，真实请求还会被缓存与请求期压缩器改写。这里只回答「这些 token 按当前单价折算是多少」；「实测」那一栏才是 provider 回报的真实计费。'),
+          h('div', { style: C.noteLine }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。'),
+          h('div', { style: C.noteLine }, calibrationNote(cost)),
+          h('div', { style: C.noteLine }, costDriftNote(cost.drift)),
+          h('div', { style: C.noteLine }, missNote(totals)),
+          h('div', { style: C.noteLine }, estimateVsActualNote(cost))
+        ),
         h('div', { style: Object.assign({}, C.sub, { margin: '10px 0 4px' }) }, '按类别拆分（估算）'),
         h('div', { style: { maxHeight: '260px', overflowY: 'auto' } },
           h('table', { style: C.table },
@@ -556,7 +582,6 @@ window.__ModuleLoader__.load({
       var state = react.useState({ status: 'loading', data: null, error: '', at: 0 })
       var payload = state[0]
       var setPayload = state[1]
-      var tick = react.useState(0)
       var alive = react.useRef(true)
       var compositionState = react.useState({ data: null, error: '' })
       var setComposition = compositionState[1]
@@ -585,7 +610,7 @@ window.__ModuleLoader__.load({
           clearInterval(timer)
           if (controller) controller.abort()
         }
-      }, [sessionId, tick[0]])
+      }, [sessionId])
 
       // 构成图单独一条通道：它要服务端重建模型视角，失败也只影响这两张图，不动账本数字。
       react.useEffect(function () {
@@ -612,23 +637,26 @@ window.__ModuleLoader__.load({
           clearInterval(timer)
           if (controller) controller.abort()
         }
-      }, [sessionId, tick[0]])
+      }, [sessionId])
 
       var data = payload.data
       var totals = data && data.totals ? data.totals : null
-      var startedAt = payload.at || (data && data.generatedAt) || 0
-      var toolbar = h('div', { style: C.row },
-        h('span', { style: C.sub }, startedAt ? '更新于 ' + clock(startedAt) + ' · 每 5 秒自动刷新' : '读取中…'),
-        h('div', { style: { flex: 1 } }),
-        h('button', { style: C.button, onClick: function () { tick[1](function (value) { return value + 1 }) } }, '刷新')
-      )
+      // 刷新时间放在顶栏：它属于整页的新鲜度，不该跟着内容滚出屏幕。
+      react.useEffect(function () {
+        if (!props.onMeta) return
+        var at = payload.at || (payload.data && payload.data.generatedAt) || 0
+        props.onMeta({
+          text: at ? '更新于 ' + clock(at) + ' · 每 5 秒自动刷新' : '正在读取…',
+          error: payload.status === 'error' ? payload.error : '',
+        })
+      }, [payload.at, payload.status, payload.error])
 
       var errorLine = payload.status === 'error' && payload.error
         ? h('div', { style: { fontSize: '12px', color: '#f87171' } }, '读取统计失败：' + payload.error + '（每 5 秒会自动重试）')
         : null
 
       if (!data) {
-        return h('div', {}, toolbar, errorLine,
+        return h('div', {}, errorLine,
           h('div', { style: C.notice }, payload.status === 'loading' ? '正在读取统计…' : '还没有数据。'))
       }
 
@@ -681,7 +709,7 @@ window.__ModuleLoader__.load({
         '估算口径与宿主 token-meter 一致：每 ' + (data.estimate ? data.estimate.charsPerToken : 4) + ' 字符算 1 token，每个文本块再加 ' + (data.estimate ? data.estimate.blockOverhead : 4) + ' token 开销。'
       )
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, toolbar, errorLine, kpis, compositionPanel, costSection, chartSection, tableSection, footnote)
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, errorLine, kpis, compositionPanel, costSection, chartSection, tableSection, footnote)
     }
 
     // ---------- 模型视角 ----------
@@ -1379,17 +1407,17 @@ window.__ModuleLoader__.load({
       react.useEffect(function () {
         alive.current = true
         var controller = typeof AbortController === 'function' ? new AbortController() : null
-        setPayload(function (previous) { return { status: previous.data ? 'ready' : 'loading', data: previous.data, error: '' } })
+        setPayload(function (previous) { return { status: previous.data ? 'ready' : 'loading', data: previous.data, error: '', at: previous.at || 0 } })
         fetch('/fold-view?session=' + encodeURIComponent(sessionId), controller ? { signal: controller.signal } : undefined)
           .then(readJson)
           .then(function (body) {
             if (!alive.current) return
-            setPayload({ status: 'ready', data: body, error: '' })
+            setPayload({ status: 'ready', data: body, error: '', at: Date.now() })
           })
           .catch(function (error) {
             if (!alive.current || (error && error.name === 'AbortError')) return
             setPayload(function (previous) {
-              return { status: previous.data ? 'ready' : 'error', data: previous.data, error: String(error && error.message ? error.message : error) }
+              return { status: previous.data ? 'ready' : 'error', data: previous.data, error: String(error && error.message ? error.message : error), at: previous.at || 0 }
             })
           })
         return function () {
@@ -1398,15 +1426,23 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId, tick[0]])
 
+      // 这一页不自动刷新：一次请求就是一整份投影，反复拉会白烧 CPU（每轮卡片都被重渲染）。
+      react.useEffect(function () {
+        if (!props.onMeta) return
+        if (payload.status === 'error') props.onMeta({ text: '读取失败', error: payload.error })
+        else if (payload.data) props.onMeta({ text: '读取于 ' + clock(payload.at || 0), error: '' })
+        else props.onMeta({ text: '正在读取…', error: '' })
+      }, [payload.status, payload.at, payload.error])
+
       var data = payload.data
       var toolbar = h('div', { style: C.row },
-        h('div', { style: C.sub }, '这是 session.deriveMessages() 派生的真实请求历史：折叠检查点就是模型实际看到的样子；点开一轮才渲染正文，避免长历史卡顿。'),
+        h('div', { style: C.sub }, '模型实际收到的历史；点开一轮才读取正文。'),
         h('div', { style: { flex: 1 } }),
         h('label', { style: Object.assign({}, C.sub, { cursor: 'pointer' }) },
           h('input', { type: 'checkbox', checked: wide[0], onChange: function (event) { wide[1](event.target.checked) } }),
           ' 展开长文本'
         ),
-        h('button', { style: C.button, onClick: function () { tick[1](function (value) { return value + 1 }) } }, '刷新')
+        h('button', { style: C.button, title: '这一页不自动刷新，重新拉一次投影', onClick: function () { tick[1](function (value) { return value + 1 }) } }, '重新读取')
       )
       if (!data) {
         return h('div', {}, toolbar,
@@ -1616,32 +1652,56 @@ window.__ModuleLoader__.load({
       var tabState = react.useState('ledger')
       var tab = tabState[0]
       var setTab = tabState[1]
+      // 顶栏那行小字由当前标签页回填：账本给「更新于 …」，模型视角给「读取于 …」。
+      var metaState = react.useState(null)
+      var reportMeta = react.useCallback ? react.useCallback(function (next) { metaState[1](next) }, []) : function (next) { metaState[1](next) }
+      // 关掉总开关时插件对模型完全静默，这一页就只剩账单：先说清楚，免得有人以为折叠坏了。
+      var offState = react.useState(null)
+      react.useEffect(function () {
+        var alive = true
+        fetch('/fold-config')
+          .then(readJson)
+          .then(function (body) {
+            if (!alive) return
+            var settings = body && body.config ? body.config : null
+            offState[1](Boolean(settings) && settings.enabled === false)
+          })
+          .catch(function () {
+            // 读不到配置就当「不知道」：这一条只是提示，不该因为配置接口出错就挡住账本。
+            if (alive) offState[1](null)
+          })
+        return function () { alive = false }
+      }, [])
       if (!sessionId) {
         return h('div', { style: C.panel }, h('div', { style: C.notice }, '切换到具体会话后，这里显示该会话的折叠情况。'))
       }
       var tabs = [['ledger', '账本'], ['model', '模型视角']]
-      var header = h('div', { style: C.row },
-        h('div', { style: C.title }, '上下文折叠'),
-        h('div', { style: C.sub }, '按轮折叠 · 折叠算收益，召回与重要消息算成本 · 参数在侧栏「插件」页的 dsh-fold-context 页面里调'),
-        h('div', { style: { flex: 1 } }),
-        h('a', {
-          style: Object.assign({}, C.button, { textDecoration: 'none', display: 'inline-block' }),
-          href: '/fold-report?session=' + encodeURIComponent(sessionId),
-          target: '_blank',
-          rel: 'noopener noreferrer',
-        }, '逐轮报告')
+      var meta = metaState[0]
+      // 换标签页就清掉上一页的「更新于」：两页读取节奏不同，混在一行会让人以为刚刷新过。
+      react.useEffect(function () { metaState[1](null) }, [tab])
+      var header = h('div', { style: C.header },
+        h('div', { style: C.headerTop },
+          h('div', { style: C.title }, '上下文折叠'),
+          h('div', { style: C.sub }, '折叠算收益，召回与重要消息算成本'),
+          h('div', { style: Object.assign({}, C.headerMeta, meta && meta.error ? C.headerMetaError : {}) },
+            meta && meta.error ? '读取失败：' + meta.error : (meta ? meta.text : '')
+          )
+        ),
+        h('div', { style: C.tabRow }, tabs.map(function (item) {
+          return h('button', {
+            key: item[0],
+            style: Object.assign({}, C.tab, tab === item[0] ? C.tabActive : {}),
+            onClick: function () { setTab(item[0]) },
+          }, item[1])
+        }), h('div', { style: C.tabHint }, '参数在侧栏「插件」页'))
       )
-      var tabBar = h('div', { style: C.tabBar }, tabs.map(function (item) {
-        return h('button', {
-          key: item[0],
-          style: Object.assign({}, C.tab, tab === item[0] ? C.tabActive : {}),
-          onClick: function () { setTab(item[0]) },
-        }, item[1])
-      }))
+      var offBanner = offState[0] === true
+        ? h('div', { style: C.notice }, '压缩已关闭：不折叠、不注入折叠说明、也不提供召回与固化工具。下方数字取自未压缩的会话，用来核对账单。')
+        : null
       var body = tab === 'model'
-        ? h(ModelView, { sessionId: sessionId })
-        : h(Ledger, { sessionId: sessionId })
-      return h('div', { style: C.panel }, header, tabBar, body)
+        ? h(ModelView, { sessionId: sessionId, onMeta: reportMeta })
+        : h(Ledger, { sessionId: sessionId, onMeta: reportMeta })
+      return h('div', { style: C.panel }, header, offBanner, body)
     }
 
     function apply(ctx) {
@@ -1669,6 +1729,9 @@ window.__ModuleLoader__.load({
     exports.inject = ['slots']
     // 供 node 冒烟测试直接调用组件函数：客户端没有测试框架，暴露内部组件比引入依赖便宜。
     exports.__test = {
+      FoldStatsView: FoldStatsView,
+      Ledger: Ledger,
+      ModelView: ModelView,
       CompositionPanel: CompositionPanel,
       CompositionChart: CompositionChart,
       TurnCard: TurnCard,
