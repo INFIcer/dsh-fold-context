@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { assemble } from '../lib/host.js'
+import { FoldStore } from '../lib/store.js'
 import { FakeSession, assistantNode, makeCtx, toolNode, userNode } from './fakes.js'
 
 // 折叠是延时到下一拍定时器才落的，等两个 0ms 定时器就够。
@@ -96,16 +97,18 @@ test('召回次数超阈值时给出固化提醒', async () => {
   session.seed(nodes)
   emit(ctx, session, { type: 'turn/start', seq: 3, data: { turn: 1 } })
   emit(ctx, session, { type: 'step/start', seq: 4, data: { turn: 1, step: 1 } })
-  emitSurface(ctx, session, assistantNode(5, { text: '长'.repeat(1500) }))
+  emitSurface(ctx, session, assistantNode(5, { text: '长'.repeat(4000) }))
   emit(ctx, session, { type: 'step/end', seq: 6, data: { turn: 1, step: 1 } })
   emit(ctx, session, { type: 'turn/end', seq: 7, data: { turn: 1, reason: { kind: 'stop' } } })
   await tick()
   const checkpoint = checkpointOf(session)
   assert.ok(checkpoint)
   const tool = toolNamed(ctx, 'fold_recall')
-  const first = await tool.execute({ id: 'f1' }, { agent: { session } })
+  // 第一次内容召回次数刚到 1，不提醒；第二次超过阈值，提醒固化。
+  const first = await tool.execute({ id: 'f1', parts: ['1'] }, { agent: { session } })
   assert.equal(first.ok, true)
-  const second = await tool.execute({ id: 'f1' }, { agent: { session } })
+  assert.equal(first.text.includes('fold_pin'), false)
+  const second = await tool.execute({ id: 'f1', parts: ['1'] }, { agent: { session } })
   assert.ok(second.text.includes('fold_pin'))
   api.stop()
 })
@@ -145,7 +148,41 @@ test('轮内发布的重要消息推迟到折叠之后注入，整轮照常折�
   api.stop()
 })
 
-test('配置里关掉开关就只注册工具，不折叠', async () => {
+test('轮内发布的消息在插件重启后补投，注入成功后删掉待投递记录', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-restore')
+  session.seed([userNode(1, '开始', 'user')])
+  emit(ctx, session, { type: 'turn/start', seq: 4, data: { turn: 2 } })
+  emit(ctx, session, { type: 'step/start', seq: 5, data: { turn: 2, step: 1 } })
+
+  const pin = await toolNamed(ctx, 'fold_pin').execute({ label: '接口约定', text: '字段名用 snake_case' }, { agent: { session } })
+  assert.equal(pin.ok, true)
+  assert.ok(pin.text.includes('待投递记录'), pin.text)
+  // 消息还没注入，但「答应过要发」的记录已经落盘。
+  assert.equal(new FoldStore({ homeDir, sessionId: 'sess-restore' }).pendingPins().length, 1)
+
+  // 模拟进程退出：内存队列跟着运行时一起消失，只剩那条待投递记录。
+  api.stop()
+
+  const ctx2 = makeCtx()
+  const api2 = assemble(ctx2, { homeDir, logFile: null })
+  const resumed = new FakeSession('sess-restore')
+  resumed.seed([userNode(1, '开始', 'user')])
+  emit(ctx2, resumed, { type: 'turn/start', seq: 4, data: { turn: 2 } })
+  // 补投要等这一轮结束：轮内直接插进去会打断工具调用与结果的分段。
+  emit(ctx2, resumed, { type: 'turn/end', seq: 5, data: { turn: 2, reason: { kind: 'stop' } } })
+  await tick()
+
+  const pinEvent = resumed.events.find((event) => event.data && event.data.source && event.data.source.kind === 'fold-pin')
+  assert.ok(pinEvent, '重启后应当补投未注入的重要消息')
+  assert.ok(pinEvent.data.content[0].text.includes('字段名用 snake_case'))
+  assert.equal(new FoldStore({ homeDir, sessionId: 'sess-restore' }).pendingPins().length, 0, '注入成功后待投递记录要删掉')
+  api2.stop()
+})
+
+test('配置里关掉总开关：不折叠、不注入提示段、也不注册工具', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
   writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ enabled: false }), 'utf8')
   const ctx = makeCtx()
@@ -159,8 +196,39 @@ test('配置里关掉开关就只注册工具，不折叠', async () => {
   emit(ctx, session, { type: 'turn/end', seq: 6, data: { turn: 1, reason: { kind: 'stop' } } })
   await tick()
   assert.equal(checkpointOf(session), undefined)
-  assert.ok(toolNamed(ctx, 'fold_recall'))
+  // 模型侧完全静默：既没有折叠说明，也没有三个工具，账单才等于「没有这个插件」。
+  assert.equal(ctx.sections.length, 0)
+  assert.equal(ctx.registrations.length, 0)
   assert.equal(api.getConfig().enabled, false)
+  api.stop()
+})
+
+test('总开关翻转时提示段与工具跟着上下，不用重启', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-toggle')
+  assert.ok(toolNamed(ctx, 'fold_config'))
+  assert.ok(ctx.sections.some((section) => section.name === 'fold-compression'))
+
+  // fold_config 关掉的是它自己：注册项必须挪到下一拍再摘，否则会在自己的调用里被 dispose。
+  const off = await toolNamed(ctx, 'fold_config').execute({ action: 'set', patch: { enabled: false } }, { agent: { session } })
+  assert.equal(off.ok, true)
+  await tick()
+  assert.equal(toolNamed(ctx, 'fold_recall'), undefined)
+  assert.equal(toolNamed(ctx, 'fold_pin'), undefined)
+  assert.equal(toolNamed(ctx, 'fold_config'), undefined)
+  assert.equal(ctx.sections.some((section) => section.name === 'fold-compression'), false)
+
+  // 关掉之后设置页仍能把它打开：下一轮重新挂上提示段与工具。
+  writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ enabled: true }), 'utf8')
+  emit(ctx, session, { type: 'turn/start', seq: 2, data: { turn: 2 } })
+  emit(ctx, session, { type: 'step/start', seq: 3, data: { turn: 2, step: 1 } })
+  emit(ctx, session, { type: 'turn/end', seq: 4, data: { turn: 2, reason: { kind: 'stop' } } })
+  await tick()
+  assert.ok(toolNamed(ctx, 'fold_recall'))
+  assert.ok(toolNamed(ctx, 'fold_config'))
+  assert.ok(ctx.sections.some((section) => section.name === 'fold-compression'))
   api.stop()
 })
 
@@ -199,14 +267,13 @@ test('turn-stopping 时立刻折叠，且随后的 turn/end 不会再折一次',
 })
 test('长折叠先回目录，再用 parts 多选取回，目录查询不算一次内容召回', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
-  writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ recallDirectTokens: 250 }), 'utf8')
   const ctx = makeCtx()
   const api = assemble(ctx, { homeDir, logFile: null })
   const session = new FakeSession('sess-r2')
   session.seed([userNode(1, '开始', 'user')])
   emit(ctx, session, { type: 'turn/start', seq: 2, data: { turn: 1 } })
   emit(ctx, session, { type: 'step/start', seq: 3, data: { turn: 1, step: 1 } })
-  emitSurface(ctx, session, assistantNode(4, { reasoning: '思'.repeat(700), text: '答'.repeat(1600), calls: [{ id: 'c1', name: 'read' }] }))
+  emitSurface(ctx, session, assistantNode(4, { reasoning: '思'.repeat(1000), text: '答'.repeat(1600), calls: [{ id: 'c1', name: 'read' }] }))
   emitSurface(ctx, session, toolNode(5, 'c1', '果'.repeat(400)))
   emit(ctx, session, { type: 'step/end', seq: 6, data: { turn: 1, step: 1 } })
   emit(ctx, session, { type: 'turn/end', seq: 7, data: { turn: 1, reason: { kind: 'stop' } } })
@@ -241,7 +308,7 @@ test('fold_config 拒绝未知键，get 里能看到分级召回的字段', asyn
   session.seed([userNode(1, '开始', 'user')])
   const tool = toolNamed(ctx, 'fold_config')
   const shown = await tool.execute({ action: 'get' }, { agent: { session } })
-  assert.ok(shown.text.includes('recallDirectTokens'))
+  assert.ok(shown.text.includes('recallIndexPreviewTokens'))
   const bad = await tool.execute({ action: 'set', patch: { nope: 1 } }, { agent: { session } })
   assert.equal(bad.ok, false)
   api.stop()

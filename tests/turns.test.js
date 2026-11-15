@@ -105,7 +105,6 @@ test('系统提示词按出现时间单独成块，绝不进任何一轮', () =>
       userEntry('第一句'),
       assistantEntry('答一句'),
     ],
-    minFoldTokens: 1000,
   })
   assert.deepEqual(groups.map((group) => group.kind), ['system', 'turn'])
   assert.equal(groups[0].chars, 100)
@@ -123,7 +122,6 @@ test('轮中出现的系统提示词就地切开当前轮，不并入相邻轮',
       entry({ role: 'system', chars: 50, text: '更新' }),
       assistantEntry('再答一句'),
     ],
-    minFoldTokens: 1,
   })
   assert.deepEqual(groups.map((group) => group.kind), ['turn', 'system', 'turn'])
   const turnGroups = groups.filter((group) => group.kind === 'turn')
@@ -140,7 +138,6 @@ test('后一版系统提示词只带与前一版的差异，且系统块不参�
       assistantEntry('答一句'),
       entry({ role: 'system', chars: 5, text: 'a\nB\nc' }),
     ],
-    minFoldTokens: 1,
   })
   assert.deepEqual(groups.map((group) => group.kind), ['system', 'turn', 'system'])
   assert.equal(groups[2].version, 2)
@@ -159,7 +156,6 @@ test('轮结束后落地的折叠检查点归上一轮，不另开一轮', () =>
       userEntry('第二句'),
       assistantEntry('答二'),
     ],
-    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups.length, 2)
@@ -180,7 +176,6 @@ test('折叠轮没留回复原文时，把摘要里的回复开头当预览', ()
         items: [{ seq: 3, chars: 200, blocks: [{ kind: 'think', name: '', text: '想' }] }],
       }),
     ],
-    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups[0].replyText, '')
@@ -196,7 +191,6 @@ test('轮次按用户消息顺序编号；第一个折叠轮之前标插件生�
       userEntry('新一轮'),
       checkpointEntry({ foldId: 'f9', noteChars: 30, items: [{ seq: 9, chars: 2000, blocks: [{ kind: 'reply', name: '', text: big }] }] }),
     ],
-    minFoldTokens: 1000,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups[0].turn, 1)
@@ -219,7 +213,6 @@ test('轮次以折叠记录里的 turn 为准，前后按相邻轮次推断', ()
       }),
       userEntry('第四句'),
     ],
-    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.deepEqual(turnGroups.map((group) => group.turn), [2, 3, 4])
@@ -227,14 +220,6 @@ test('轮次以折叠记录里的 turn 为准，前后按相邻轮次推断', ()
   assert.equal(turnGroups[1].folded, true)
 })
 
-test('没折叠且内容太少时标为内容较少', () => {
-  const groups = buildTurnGroups({
-    entries: [userEntry('短'), assistantEntry('短答')],
-    minFoldTokens: 1000,
-  })
-  const turnGroups = groups.filter((group) => group.kind === 'turn')
-  assert.equal(turnGroups[0].short, true)
-})
 test('下一轮的触发消息被折掉时，用检查点里的 turn 换轮', () => {
   const groups = buildTurnGroups({
     entries: [
@@ -250,7 +235,6 @@ test('下一轮的触发消息被折掉时，用检查点里的 turn 换轮', ()
       }),
       userEntry('第三句'),
     ],
-    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.deepEqual(turnGroups.map((group) => group.turn), [1, 2, 3])
@@ -265,9 +249,85 @@ test('同一轮被切成多条检查点时不换轮', () => {
       checkpointEntry({ foldId: 'f1a', turn: 1, noteChars: 20, items: [] }),
       checkpointEntry({ foldId: 'f1b', turn: 1, noteChars: 20, items: [] }),
     ],
-    minFoldTokens: 10,
   })
   const turnGroups = groups.filter((group) => group.kind === 'turn')
   assert.equal(turnGroups.length, 1)
   assert.deepEqual(turnGroups[0].foldIds, ['f1a', 'f1b'])
+})
+
+test('召回调用标在条目与折叠段上，并汇总到轮次标签', () => {
+  // 真实数据里工具参数是 JSON 字符串：run_code 的脚本在 code 字段里，扫描前要先解码。
+  const nested = 'const q = await tools.fold_recall({ query: "lib/web.js" });\nconst r = await tools.fold_recall({ id: "f1c", parts: ["48"] });'
+  const groups = buildTurnGroups({
+    entries: [
+      userEntry('第一句'),
+      entry({
+        role: 'assistant',
+        blocks: [{ kind: 'call', name: 'fold_recall', text: '{"id":"f3","parts":["1","3-5"]}' }],
+      }),
+      entry({ role: 'assistant', blocks: [{ kind: 'call', name: 'run_code', text: JSON.stringify({ code: nested }) }] }),
+      // 参数里只是引用了字样、没有真的调用：不算召回。
+      entry({ role: 'assistant', blocks: [{ kind: 'call', name: 'run_code', text: JSON.stringify({ code: 'const example = "tools.fold_recall(";' }) }] }),
+      checkpointEntry({
+        foldId: 'f1c',
+        noteChars: 20,
+        items: [
+          { seq: 5, chars: 20, blocks: [{ kind: 'call', name: 'fold_recall', text: '{"query":"fold-view MB 17"}' }] },
+          { seq: 6, chars: 10, blocks: [{ kind: 'reply', name: '', text: '答一句' }] },
+        ],
+      }),
+    ],
+    recallCounts: new Map([['f1c', 2]]),
+  })
+  const turn = groups.find((group) => group.kind === 'turn')
+  assert.equal(turn.recallCallCount, 2)
+  assert.equal(turn.recallSearchCount, 2)
+  assert.equal(turn.recalledCount, 2)
+
+  const direct = turn.entries[1]
+  assert.deepEqual(direct.recallCalls, [{ id: 'f3', query: '', parts: '1,3-5', via: '' }])
+  const nestedEntry = turn.entries[2]
+  assert.deepEqual(nestedEntry.recallCalls.map((call) => [call.id, call.query, call.via]), [
+    ['', 'lib/web.js', 'run_code'],
+    ['f1c', '', 'run_code'],
+  ])
+  assert.equal(turn.entries[3].recallCalls.length, 0)
+
+  const checkpoint = turn.entries[4]
+  assert.equal(checkpoint.recalledCount, 2)
+  assert.equal(checkpoint.foldedRecallCount, 0)
+  assert.equal(checkpoint.foldedSearchCount, 1)
+  const recalledPart = checkpoint.foldRecord.items[0]
+  assert.deepEqual(recalledPart.recallCalls, [{ id: '', query: 'fold-view MB 17', parts: '', via: '' }])
+})
+
+test('折叠段的调用带块归属：标记只落在调用块上', () => {
+  // 一个折叠段里常常先有思考、再有调用，页面按块切成两段，标记只能标到后面那一段。
+  const nested = 'await tools.fold_recall({ id: "f2", parts: ["1"] })'
+  const groups = buildTurnGroups({
+    entries: [
+      userEntry('第一句'),
+      checkpointEntry({
+        foldId: 'f1c',
+        noteChars: 40,
+        items: [
+          {
+            seq: 5,
+            chars: 40,
+            text: '[思考] 先看目录\n[调用 run_code] ' + JSON.stringify({ code: nested }),
+            // 真实数据里 inspect 会把段文本按标记拆成块，这里给同一形态。
+            blocks: [
+              { kind: 'think', name: '', text: '先看目录' },
+              { kind: 'call', name: 'run_code', text: JSON.stringify({ code: nested }) },
+            ],
+          },
+        ],
+      }),
+    ],
+  })
+  const turn = groups.find((group) => group.kind === 'turn')
+  const item = turn.entries[1].foldRecord.items[0]
+  assert.equal(item.recallCalls.length, 1)
+  // 第 0 块是思考、第 1 块是调用：页面据此只标第 2 段。
+  assert.deepEqual(item.recallCallBlocks, [1])
 })

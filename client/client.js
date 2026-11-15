@@ -12,9 +12,14 @@ window.__ModuleLoader__.load({
     var react = require('react')
 
     var h = react.createElement
+    // 宿主注入的 react 版本不一定带 useMemo；没有就退回每次现算，解析本身是线性的。
+    var useMemoHook = typeof react.useMemo === 'function' ? react.useMemo : null
     var REFRESH_MS = 5000
     // 构成图要服务端重建一份模型视角，比账本数字贵得多，单独按更慢的节奏拉。
     var COMPOSITION_REFRESH_MS = 20000
+    // 引用跳转的出口：组件树从上到下要穿五层，传一串回调不如放一个模块级出口。
+    // ModelView 挂载时注册、卸载时清空，跳转目标永远指向当前这一页。
+    var NAV = { jump: null, refs: null, gen: 0 }
 
     function formatTokens(value) {
       var n = typeof value === 'number' && isFinite(value) ? value : 0
@@ -30,6 +35,12 @@ window.__ModuleLoader__.load({
       var n = typeof value === 'number' && isFinite(value) ? value : 0
       if (n >= 1000) return (n / 1000).toFixed(1) + 'k 字'
       return Math.round(n) + ' 字'
+    }
+
+    // 切分点要精确到字：这是「原文多少字 / 这次给了多少」的坐标，不能四舍五入成 7.3k。
+    function exactChars(value) {
+      var n = typeof value === 'number' && isFinite(value) ? Math.round(value) : 0
+      return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' 字'
     }
 
     // 字数与 token 一起给：4 字符 ≈ 1 token，与宿主 token-meter 的基本档一致。
@@ -73,10 +84,20 @@ window.__ModuleLoader__.load({
       return (value * 100).toFixed(1) + '%'
     }
 
+    // 摘要只取前 limit 个可见字符：先把开头一段压平，够长就截，不够再往后看。
+    // 不能上全局替换——一条工具输出可能有几十万字，每张收起的卡片都扫一遍就是白烧 CPU。
     function preview(text, limit) {
-      var value = String(text === null || text === undefined ? '' : text).replace(/\s+/g, ' ').trim()
-      if (!value) return '（没有文字）'
-      return value.length <= limit ? value : value.slice(0, limit) + '…'
+      var source = String(text === null || text === undefined ? '' : text)
+      var got = Math.max(limit * 4, 400)
+      var flat = ''
+      while (true) {
+        var cut = Math.min(got, source.length)
+        flat = source.slice(0, cut).replace(/\s+/g, ' ').trim()
+        if (flat.length > limit || cut >= source.length) break
+        got = cut * 2
+      }
+      if (!flat) return '（没有文字）'
+      return flat.length <= limit ? flat : flat.slice(0, limit) + '…'
     }
 
     function clock(at) {
@@ -99,13 +120,31 @@ window.__ModuleLoader__.load({
     }
 
     var C = {
-      panel: { display: 'flex', flexDirection: 'column', gap: '14px', padding: '18px 22px 32px', minHeight: '100%', boxSizing: 'border-box' },
+      panel: { display: 'flex', flexDirection: 'column', gap: '14px', padding: '0 22px 32px', minHeight: '100%', boxSizing: 'border-box' },
       row: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' },
       title: { fontSize: '15px', fontWeight: 600, lineHeight: '22px' },
       sub: { fontSize: '12px', opacity: 0.62, lineHeight: '18px' },
-      tabBar: { display: 'flex', gap: '2px', borderBottom: '1px solid rgba(128,128,128,.25)' },
-      tab: { fontSize: '12px', padding: '7px 14px', border: 'none', borderBottom: '2px solid transparent', background: 'transparent', color: 'inherit', opacity: 0.6, cursor: 'pointer' },
+      // 顶栏贴住视口上沿：横向用负边距吃掉面板留白，底色不透明才遮得住滑过去的正文。
+      // 宿主把对话内容放在 overflow:auto 的滚动容器里，这里只负责在容器内粘住，不改宿主的布局。
+      header: {
+        position: 'sticky',
+        top: 0,
+        zIndex: 20,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        margin: '0 -22px',
+        padding: '14px 22px 0',
+        background: 'var(--dsw-alias-bg-base, #1b1d21)',
+        borderBottom: '1px solid rgba(128,128,128,.22)',
+      },
+      headerTop: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' },
+      headerMeta: { marginLeft: 'auto', fontSize: '11px', opacity: 0.55, fontVariantNumeric: 'tabular-nums' },
+      headerMetaError: { color: '#f87171', opacity: 1 },
+      tabRow: { display: 'flex', alignItems: 'flex-end' },
+      tab: { fontSize: '13px', padding: '7px 1px', marginRight: '20px', border: 'none', borderBottom: '2px solid transparent', background: 'transparent', color: 'inherit', opacity: 0.62, cursor: 'pointer' },
       tabActive: { opacity: 1, borderBottomColor: '#34d399', fontWeight: 600 },
+      tabHint: { marginLeft: 'auto', fontSize: '11px', opacity: 0.42, paddingBottom: '7px' },
       card: { border: '1px solid rgba(128,128,128,.28)', borderRadius: '10px', padding: '10px 12px', minWidth: '0' },
       kpiLabel: { fontSize: '12px', opacity: 0.65, marginBottom: '4px' },
       kpiValue: { fontSize: '20px', fontWeight: 600, fontVariantNumeric: 'tabular-nums', lineHeight: '26px' },
@@ -127,6 +166,10 @@ window.__ModuleLoader__.load({
       mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontVariantNumeric: 'tabular-nums' },
       button: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.4)', background: 'transparent', color: 'inherit', cursor: 'pointer' },
       notice: { fontSize: '12px', opacity: 0.7, padding: '12px 14px', border: '1px dashed rgba(128,128,128,.35)', borderRadius: '10px', lineHeight: '20px' },
+      // 口径说明是「查账时才会读」的参考文字：收进一条折叠行，别让七段小字压在账本上。
+      notesBox: { margin: '10px 0 2px', border: '1px solid rgba(128,128,128,.18)', borderRadius: '8px', padding: '2px 10px 4px' },
+      notesSummary: { fontSize: '11px', opacity: 0.62, cursor: 'pointer', listStyle: 'none', padding: '4px 0' },
+      noteLine: { fontSize: '11px', opacity: 0.62, lineHeight: '18px', margin: '4px 0 0' },
       pinLine: { padding: '6px 0', borderTop: '1px solid rgba(128,128,128,.14)', fontSize: '12px' },
       turn: { border: '1px solid rgba(128,128,128,.22)', borderRadius: '10px', overflow: 'hidden' },
       turnSummary: { padding: '8px 12px', cursor: 'pointer', listStyle: 'none' },
@@ -159,6 +202,9 @@ window.__ModuleLoader__.load({
       blockBox: { padding: '6px 8px', margin: '5px 0', borderRadius: '6px' },
       blockWide: { maxHeight: 'none' },
       nestedBody: { marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px' },
+      // 段数一多，清单就会把页面越拉越长：装进固定高度的滚动区，滚轮在框内走，页面高度不再随段数增长。
+      scrollBox: { display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: 'min(56vh, 560px)', overflowY: 'auto', overflowX: 'hidden', paddingRight: '4px', scrollbarWidth: 'thin' },
+      scrollBoxTight: { display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: 'min(38vh, 340px)', overflowY: 'auto', overflowX: 'hidden', paddingRight: '4px', scrollbarWidth: 'thin' },
       itemBox: { border: '1px solid rgba(128,128,128,.18)', borderRadius: '6px', padding: '4px 6px' },
       itemSummary: { fontSize: '11px', cursor: 'pointer', opacity: 0.72, fontVariantNumeric: 'tabular-nums' },
       itemBody: { paddingTop: '2px' },
@@ -214,6 +260,36 @@ window.__ModuleLoader__.load({
       return { background: pair[0], borderLeft: '3px solid ' + pair[1] }
     }
 
+    // 召回标记按方向分三种颜色：被召回红、召回黄、检索橘黄。三种色相在正文灰底上互相拉开，
+    // 再加同色浅底与不透明的文字——C.tag 默认半透明灰边，那种规格在几万字的清单里会沉进正文，
+    // 扫不出来就等于没标。账本里「召回成本」的红是数字不是标签，两者不在同一处，不会混。
+    var RECALL_HUES = { recalled: '239,68,68', recall: '234,179,8', search: '249,115,22' }
+    var RECALL_TEXT = { recalled: '#ef4444', recall: '#eab308', search: '#f97316' }
+
+    function recallTagStyle(kind) {
+      var hue = RECALL_HUES[kind] || RECALL_HUES.recall
+      return {
+        color: RECALL_TEXT[kind] || RECALL_TEXT.recall,
+        borderColor: 'rgba(' + hue + ',.55)',
+        background: 'rgba(' + hue + ',.16)',
+        opacity: 1,
+        fontWeight: 600,
+      }
+    }
+
+    var RECALL_TAG_STYLE = recallTagStyle('recall')
+    var SEARCH_TAG_STYLE = recallTagStyle('search')
+    var RECALLED_TAG_STYLE = recallTagStyle('recalled')
+    // 能点的标签：颜色说明方向，指针说明可以跳过去。
+    var CHIP_CLICK = { cursor: 'pointer' }
+    // 跳转落点短暂描边：滚过去之后得看得见落在哪一段上。
+    var FLASH_STYLE = { outline: '1px solid rgba(234,179,8,.65)', outlineOffset: '1px' }
+
+    // 一次调用是召回还是检索，只看它有没有折叠编号：只给 query 的是关键词检索，没有返回原文。
+    function recallCallStyle(call) {
+      return call && call.id ? RECALL_TAG_STYLE : SEARCH_TAG_STYLE
+    }
+
     function entryKindOf(entry) {
       if (!entry) return 'text'
       if (entry.isCheckpoint) return 'checkpoint'
@@ -245,7 +321,7 @@ window.__ModuleLoader__.load({
           label: '召回成本',
           value: (recall > 0 ? '−' : '') + formatTokens(recall) + ' token',
           color: recall > 0 ? '#f87171' : 'inherit',
-          hint: totals.recalls + ' 次召回' + (totals.probes > 0 ? ' + ' + totals.probes + ' 次目录/检索' : '') + '，' + totals.recalledFolds + ' 段被回看过',
+          hint: totals.recalls + ' 次召回' + (totals.probes > 0 ? ' + ' + totals.probes + ' 次目录/检索（同样计入成本）' : '') + '，' + totals.recalledFolds + ' 段被回看过',
         },
         {
           label: '重要消息成本',
@@ -376,12 +452,30 @@ window.__ModuleLoader__.load({
     // 未命中口径：两种视角都要为原文付一次首次上行；折叠视角还要多付
     // 检查点、固化消息、召回返回的正文——所以不折叠的未命中总是更小一截。
     // 折叠真正省的是命中档：前缀体积小 5 倍，重复部分才便宜。
+    // 多出来的那一截按来源拆开写：只报合计数时，读者分不出「分段目录」与「召回原文」各占多少，
+    // 而分段目录恰恰是最容易被误当成免费的那一笔——它是 fold_recall 的工具结果，同样按未命中计。
+    function overheadParts(totals) {
+      var overhead = totals && totals.pluginOverhead
+      if (!overhead) return []
+      var parts = []
+      if (overhead.checkpoint > 0) parts.push('检查点 ' + formatTokens(overhead.checkpoint))
+      if (overhead.recall > 0) parts.push('召回原文 ' + formatTokens(overhead.recall))
+      if (overhead.probe > 0) parts.push('分段目录与检索 ' + formatTokens(overhead.probe))
+      if (overhead.pin > 0) parts.push('重要消息 ' + formatTokens(overhead.pin))
+      return parts
+    }
+
     function missNote(totals) {
       var folded = totals && typeof totals.foldedInputTokens === 'number' ? totals.foldedInputTokens : 0
       var plain = totals && typeof totals.unfoldedInputTokens === 'number' ? totals.unfoldedInputTokens : 0
       var diff = Math.max(0, folded - plain)
-      return '未命中 = 内容首次上行的那一次。原文两种视角都要付一次；折叠多出检查点、固化消息、召回正文，'
-        + '累计 ' + formatTokens(diff) + ' token。折叠省的是命中档：前缀体积小，重复重发的部分按缓存价便宜一半多。'
+      var parts = overheadParts(totals)
+      var detail = parts.length > 0
+        ? parts.join('、') + '，合计 ' + formatTokens(diff) + ' token'
+        : '检查点、固化消息、召回正文，累计 ' + formatTokens(diff) + ' token'
+      return '未命中 = 内容首次上行的那一次。原文两种视角都要付一次；折叠多出的是插件自己写进上下文的内容：'
+        + detail + '。分段目录与关键词检索也是 fold_recall 的工具结果，同样算在这笔未命中里。'
+        + '折叠省的是命中档：前缀体积小，重复重发的部分按缓存价便宜一半多。'
     }
 
     // 折叠视角的重放量应该≈ provider 实测（同一份历史在每一步被重发），对不上就直接写差多少。
@@ -514,8 +608,15 @@ window.__ModuleLoader__.load({
               h('thead', {}, headCells(['轮', '步', '折叠后', '不折叠', '净省 token', '实际输入'])),
               h('tbody', {}, rows.map(function (row) {
                 var rowSaved = row.netSavedTokens || 0
+                // 逐轮把插件额外开销拆在提示里：合计数看不出「取目录」也算了一笔，拆开才查得动账。
+                var overhead = row.pluginOverhead
+                var overheadTitle = overhead && overhead.total > 0
+                  ? '第 ' + row.turn + ' 轮插件额外首次上行：检查点 ' + formatTokens(overhead.checkpoint || 0) +
+                    '、召回原文 ' + formatTokens(overhead.recall || 0) +
+                    '（其中分段目录与检索 ' + formatTokens(overhead.probe || 0) + '）、重要消息 ' + formatTokens(overhead.pin || 0)
+                  : undefined
                 return h('tr', { key: 'c' + row.turn },
-                  h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.turn === null ? '?' : row.turn)),
+                  h('td', { style: Object.assign({}, C.td, C.mono), title: overheadTitle }, String(row.turn === null ? '?' : row.turn)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, String(row.steps || 1)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, formatTokens(row.foldedTokens)),
                   h('td', { style: Object.assign({}, C.td, C.mono) }, formatTokens(row.unfoldedTokens)),
@@ -531,12 +632,16 @@ window.__ModuleLoader__.load({
           h('div', { style: C.sub }, priceLine(prices) + ' · 折叠收益以 token 计，金额只是同一批 token 的折算参考')
         ),
         kpis,
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '金额不是收益：同一批 token 换成高峰价就翻倍，真实请求还会被缓存与请求期压缩器改写。这里只回答「这些 token 按当前单价折算是多少」；「实测」那一栏才是 provider 回报的真实计费。'),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, calibrationNote(cost)),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, costDriftNote(cost.drift)),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, missNote(totals)),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。'),
-        h('div', { style: { fontSize: '11px', opacity: 0.6, lineHeight: '17px' } }, estimateVsActualNote(cost)),
+        // 六条口径说明每年看两次：收进折叠行，账本主体只剩数字与表。
+        h('details', { style: C.notesBox },
+          h('summary', { style: C.notesSummary }, '口径与校准说明：金额不是收益、未命中怎么算、估算与实测差多少'),
+          h('div', { style: C.noteLine }, '金额不是收益：同一批 token 换成高峰价就翻倍，真实请求还会被缓存与请求期压缩器改写。这里只回答「这些 token 按当前单价折算是多少」；「实测」那一栏才是 provider 回报的真实计费。'),
+          h('div', { style: C.noteLine }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。'),
+          h('div', { style: C.noteLine }, calibrationNote(cost)),
+          h('div', { style: C.noteLine }, costDriftNote(cost.drift)),
+          h('div', { style: C.noteLine }, missNote(totals)),
+          h('div', { style: C.noteLine }, estimateVsActualNote(cost))
+        ),
         h('div', { style: Object.assign({}, C.sub, { margin: '10px 0 4px' }) }, '按类别拆分（估算）'),
         h('div', { style: { maxHeight: '260px', overflowY: 'auto' } },
           h('table', { style: C.table },
@@ -556,7 +661,6 @@ window.__ModuleLoader__.load({
       var state = react.useState({ status: 'loading', data: null, error: '', at: 0 })
       var payload = state[0]
       var setPayload = state[1]
-      var tick = react.useState(0)
       var alive = react.useRef(true)
       var compositionState = react.useState({ data: null, error: '' })
       var setComposition = compositionState[1]
@@ -585,7 +689,7 @@ window.__ModuleLoader__.load({
           clearInterval(timer)
           if (controller) controller.abort()
         }
-      }, [sessionId, tick[0]])
+      }, [sessionId])
 
       // 构成图单独一条通道：它要服务端重建模型视角，失败也只影响这两张图，不动账本数字。
       react.useEffect(function () {
@@ -612,23 +716,26 @@ window.__ModuleLoader__.load({
           clearInterval(timer)
           if (controller) controller.abort()
         }
-      }, [sessionId, tick[0]])
+      }, [sessionId])
 
       var data = payload.data
       var totals = data && data.totals ? data.totals : null
-      var startedAt = payload.at || (data && data.generatedAt) || 0
-      var toolbar = h('div', { style: C.row },
-        h('span', { style: C.sub }, startedAt ? '更新于 ' + clock(startedAt) + ' · 每 5 秒自动刷新' : '读取中…'),
-        h('div', { style: { flex: 1 } }),
-        h('button', { style: C.button, onClick: function () { tick[1](function (value) { return value + 1 }) } }, '刷新')
-      )
+      // 刷新时间放在顶栏：它属于整页的新鲜度，不该跟着内容滚出屏幕。
+      react.useEffect(function () {
+        if (!props.onMeta) return
+        var at = payload.at || (payload.data && payload.data.generatedAt) || 0
+        props.onMeta({
+          text: at ? '更新于 ' + clock(at) + ' · 每 5 秒自动刷新' : '正在读取…',
+          error: payload.status === 'error' ? payload.error : '',
+        })
+      }, [payload.at, payload.status, payload.error])
 
       var errorLine = payload.status === 'error' && payload.error
         ? h('div', { style: { fontSize: '12px', color: '#f87171' } }, '读取统计失败：' + payload.error + '（每 5 秒会自动重试）')
         : null
 
       if (!data) {
-        return h('div', {}, toolbar, errorLine,
+        return h('div', {}, errorLine,
           h('div', { style: C.notice }, payload.status === 'loading' ? '正在读取统计…' : '还没有数据。'))
       }
 
@@ -681,7 +788,7 @@ window.__ModuleLoader__.load({
         '估算口径与宿主 token-meter 一致：每 ' + (data.estimate ? data.estimate.charsPerToken : 4) + ' 字符算 1 token，每个文本块再加 ' + (data.estimate ? data.estimate.blockOverhead : 4) + ' token 开销。'
       )
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, toolbar, errorLine, kpis, compositionPanel, costSection, chartSection, tableSection, footnote)
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, errorLine, kpis, compositionPanel, costSection, chartSection, tableSection, footnote)
     }
 
     // ---------- 模型视角 ----------
@@ -694,6 +801,30 @@ window.__ModuleLoader__.load({
         var next = event && event.currentTarget ? event.currentTarget.open === true : !state[0]
         if (next !== state[0]) state[1](next)
       }]
+    }
+
+    // 跳转落点：打开目标 details（顺带触发按需加载）、滚到看得见的地方、短暂描边。
+    // gen 每次跳转都变，依赖它才能在同一个落点上连续跳两次。
+    function useReveal(ref, active, gen, withFlash) {
+      var flash = react.useState(false)
+      react.useEffect(function () {
+        if (!active || !ref.current) return
+        var node = ref.current
+        if (node.open !== true) node.open = true
+        var scroll = setTimeout(function () {
+          if (typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        }, 80)
+        var clear = null
+        if (withFlash) {
+          flash[1](true)
+          clear = setTimeout(function () { flash[1](false) }, 1800)
+        }
+        return function () {
+          clearTimeout(scroll)
+          if (clear) clearTimeout(clear)
+        }
+      }, [gen])
+      return flash[0]
     }
 
     function firstTextOf(entry) {
@@ -715,12 +846,231 @@ window.__ModuleLoader__.load({
       return out
     }
 
+    // ---------- 召回结果：分段原文折起来看，截断点单独标出来 ----------
+    // 模型视角里的 fold_recall 返回就是一整块工具结果正文，分段召回动辄几万字：
+    // 平铺进 DOM 既卡，也看不出哪一段是取回的、单次上限切在哪。
+    // 这里沿用工具自己写的段头再切一遍，每段一个折叠条目，切分点单独一行。
+    var CUT_STYLE = {
+      fontSize: '11px',
+      lineHeight: '17px',
+      color: '#b45309',
+      background: 'rgba(217,119,6,.10)',
+      border: '1px dashed rgba(217,119,6,.55)',
+      borderRadius: '5px',
+      padding: '3px 7px',
+      marginTop: '4px',
+    }
+
+    function isNoteLine(line) {
+      return /^(（|…（)/.test(String(line || ''))
+    }
+
+    // 三种返回形态各有一种表头（整段 / 分段 / 目录）；认不出来就退回普通块，绝不改写原文。
+    function parseRecallResult(text) {
+      var value = typeof text === 'string' ? text : ''
+      if (value.indexOf('折叠 ') !== 0) return null
+      var newline = value.indexOf('\n')
+      var head = newline < 0 ? value : value.slice(0, newline)
+      var body = newline < 0 ? '' : value.slice(newline + 1)
+      var match = null
+      var result = null
+      if ((match = /^折叠 (\S+)（第 (\d+) 轮）取回 (\d+)\/(\d+) 段：$/.exec(head))) {
+        result = { kind: 'parts', id: match[1], turn: Number(match[2]), picked: Number(match[3]), total: Number(match[4]) }
+      } else if ((match = /^折叠 (\S+)（第 (\d+) 轮，原文约 ([\d,]+) 字，≈(\d+) token，共 (\d+) 段）原文较长，先给目录。$/.exec(head))) {
+        // 组号依次是：编号、轮次、原文字数、token 估算、总段数。
+        result = { kind: 'index', id: match[1], turn: Number(match[2]), chars: match[3], totalParts: Number(match[5]) }
+      } else if ((match = /^折叠 (\S+)（第 (\d+) 轮，原文约 ([\d,]+) 字，≈(\d+) token）$/.exec(head))) {
+        result = { kind: 'direct', id: match[1], turn: Number(match[2]), chars: match[3] }
+      }
+      if (!result) return null
+      result.head = head
+      result.segments = []
+      result.notes = []
+      result.lines = []
+      var lines = body.split('\n')
+
+      // 目录：正文是逐行的段号清单，尾注是「目录已截断」这类提示。
+      if (result.kind === 'index') {
+        for (var li = 0; li < lines.length; li += 1) {
+          var indexLine = lines[li]
+          if (!indexLine.trim()) continue
+          if (isNoteLine(indexLine)) result.notes.push({ cut: indexLine.indexOf('截断') >= 0, text: indexLine.trim() })
+          else result.lines.push(indexLine)
+        }
+        return result
+      }
+
+      // 整段 / 分段：按段头切，段内截断与尾注各归各位。
+      // 只把「后面全是注释」的括号行当尾注：正文里偶有一行以括号开头，不能因此把后半段吃掉。
+      function notesOnlyFrom(from) {
+        for (var t = from; t < lines.length; t += 1) {
+          var probe = lines[t].trim()
+          if (probe && !isNoteLine(probe)) return false
+        }
+        return true
+      }
+      var current = null
+      function closeSegment() {
+        if (!current) return
+        current.text = current.text.replace(/\n+$/, '')
+        result.segments.push(current)
+        current = null
+      }
+      for (var si = 0; si < lines.length; si += 1) {
+        var line = lines[si]
+        var section = /^--- #(\d+)(?: (.+?))? ---$/.exec(line)
+        if (section) {
+          closeSegment()
+          current = { no: Number(section[1]), label: section[2] || '', text: '', cut: null }
+          continue
+        }
+        var trimmed = line.trim()
+        // 段内截断：工具在段尾写「本段已截断」，正文切在那里，截断点单独标出来。
+        if (current && trimmed.indexOf('…（本段已截断：') === 0) {
+          var cut = /^…（本段已截断：原文 (\d+) 字，≈\d+ token，本次只返回前 (\d+) 字。需要完整内容请再按段召回。）$/.exec(trimmed)
+          if (cut) {
+            current.cut = { full: Number(cut[1]), kept: Number(cut[2]) }
+            closeSegment()
+            continue
+          }
+        }
+        if (isNoteLine(trimmed) && notesOnlyFrom(si + 1)) {
+          closeSegment()
+          result.notes.push({
+            cut: trimmed.indexOf('没取回') >= 0 || trimmed.indexOf('被截断') >= 0 || trimmed.indexOf('目录已截断') >= 0,
+            text: trimmed,
+          })
+          continue
+        }
+        if (!current) continue
+        current.text += (current.text ? '\n' : '') + line
+      }
+      closeSegment()
+      return result
+    }
+
+    function recallCutText(cut) {
+      return '✂ 单次上限切在这里：原文 ' + exactChars(cut.full) + '，本次只返回前 ' + exactChars(cut.kept) +
+        '；要完整内容就按这一段再召回。'
+    }
+
+    function RecallSegment(props) {
+      var opened = useLazyOpen()
+      var segment = props.segment || {}
+      var body = typeof segment.text === 'string' ? segment.text : ''
+      var cut = segment.cut || null
+      var head = '#' + segment.no + (segment.label ? ' [' + segment.label + ']' : '') + ' · ' + formatCharsTokens(body.length) +
+        (cut ? ' · 已截断' : '')
+      return h('details', { style: C.itemBox, onToggle: opened[1] },
+        h('summary', {
+          style: C.itemSummary,
+          // 切分点写在 title 里：收起时也能量出「原文多少、这次给了多少」。
+          title: cut ? '这一段超过单次召回上限：原文 ' + exactChars(cut.full) + '，本次只返回前 ' + exactChars(cut.kept) : undefined,
+        }, head),
+        opened[0]
+          ? h('div', { style: C.itemBody },
+              h('div', { style: Object.assign({}, C.blockText, props.wide ? C.blockWide : C.blockClip) }, body || '（空）'),
+              cut ? h('div', { style: CUT_STYLE }, recallCutText(cut)) : null
+            )
+          : null
+      )
+    }
+
+    function RecallResult(props) {
+      var parsed = props.parsed || {}
+      var opened = useLazyOpen()
+      var segments = Array.isArray(parsed.segments) ? parsed.segments : []
+      var notes = Array.isArray(parsed.notes) ? parsed.notes : []
+      var cuts = 0
+      var chars = 0
+      for (var i = 0; i < segments.length; i += 1) {
+        if (segments[i] && segments[i].cut) cuts += 1
+        chars += segments[i] && typeof segments[i].text === 'string' ? segments[i].text.length : 0
+      }
+      var segmentNos = []
+      if (parsed.kind !== 'index') {
+        for (var s = 0; s < segments.length; s += 1) if (segments[s]) segmentNos.push(segments[s].no)
+      }
+      // 目录形态的正文就是这些行：目录自己也占上下文，收起行要把它的字数与 token 一起给出来，
+      // 否则只写「目录 128 段」，看不出这一面墙有多大。
+      var indexLines = parsed.kind === 'index' && Array.isArray(parsed.lines) ? parsed.lines : []
+      var indexChars = 0
+      for (var il = 0; il < indexLines.length; il += 1) indexChars += String(indexLines[il] || '').length + 1
+      // 「召回 fN」单独成标签：这次工具调用取回了哪份折叠，是这一块最要紧的身份信息。
+      var headLead = '召回 ' + parsed.id
+      var head = ''
+      if (parsed.kind === 'parts') {
+        // 取回范围直接写进收起行：点了哪几段不必展开就能核对。
+        head = '分段取回 ' + parsed.picked + '/' + parsed.total + ' 段'
+        // 只列这次正文里真的出现的段号；因预算没取回的段由下面的尾注说明，不在这里凑数。
+        var ranges = compactRanges(segmentNos)
+        if (ranges) head += '（' + ranges + '）'
+      } else if (parsed.kind === 'direct') {
+        head = '整段取回 ' + segments.length + ' 段'
+      } else {
+        head = '分段目录 ' + (parsed.totalParts || 0) + ' 段（原文没有返回）'
+        if (indexLines.length > 0) head += ' · ' + formatCharsTokens(indexChars)
+      }
+      if (segments.length > 0) head += ' · ' + formatChars(chars)
+      if (cuts > 0) head += ' · ' + cuts + ' 段被截断'
+      var omitted = 0
+      for (var n = 0; n < notes.length; n += 1) {
+        var miss = /还有 (\d+) 段没取回/.exec(notes[n].text || '')
+        if (miss) omitted += Number(miss[1])
+      }
+      if (omitted > 0) head += ' · ' + omitted + ' 段没取回'
+      var children = []
+      if (parsed.kind === 'index') {
+        for (var l = 0; l < indexLines.length; l += 1) {
+          children.push(h('div', { key: 'l' + l, style: RECALL_LINE_STYLE }, indexLines[l]))
+        }
+      } else {
+        for (var s = 0; s < segments.length; s += 1) {
+          children.push(h(RecallSegment, { key: 's' + s, segment: segments[s], wide: props.wide }))
+        }
+      }
+      // 取回的段、目录行同样限高：一次分段召回可能取回几十段，展开后不该把页面拉长。
+      // 尾注留在框外——切分点与「还有 N 段没取回」是要紧信息，不能被滚走。
+      var listLimit = parsed.kind === 'index' ? LINE_SCROLL_AFTER : PART_SCROLL_AFTER
+      var body = children.length > listLimit
+        ? [h('div', {
+            key: 'list',
+            style: parsed.kind === 'index' ? C.scrollBoxTight : C.scrollBox,
+            title: children.length + ' 行，在框内滚动查看',
+          }, children)]
+        : children
+      for (var k = 0; k < notes.length; k += 1) {
+        body.push(h('div', {
+          key: 'n' + k,
+          style: notes[k].cut ? CUT_STYLE : RECALL_LINE_STYLE,
+        }, notes[k].text))
+      }
+      return h('details', { style: C.nested, onToggle: opened[1] },
+        h('summary', { style: Object.assign({}, C.nestedSummary, { opacity: 1 }), title: parsed.head || '' },
+          h('span', { style: Object.assign({}, C.tag, RECALL_TAG_STYLE, { marginRight: '6px' }) }, headLead),
+          h('span', { style: { opacity: 0.7 } }, head)
+        ),
+        opened[0] ? h('div', { style: C.nestedBody }, body) : null
+      )
+    }
+
     function BlockView(props) {
       var block = props.block || {}
       var kind = block.kind || 'text'
       var text = typeof block.text === 'string' ? block.text : ''
       var label = BLOCK_LABELS[kind] || '文本'
       if (kind === 'call' && block.name) label += ' ' + block.name
+      // fold_recall 的返回按段折起来：长原文不摊进 DOM，取回范围与切分点直接写在标题上。
+      var recall = useMemoHook
+        ? useMemoHook(function () { return kind === 'result' ? parseRecallResult(text) : null }, [text])
+        : kind === 'result' ? parseRecallResult(text) : null
+      if (recall) {
+        // 外层保留工具结果的底色与块头，内层才是可折叠的召回明细：块的归属不变，只是多收了一层。
+        return h('div', { style: Object.assign({}, tint(kind), C.blockBox) },
+          h('div', { style: C.blockHead }, label + ' · ' + formatCharsTokens(text.length)),
+          h(RecallResult, { parsed: recall, wide: props.wide })
+        )
+      }
       return h('div', { style: Object.assign({}, tint(kind), C.blockBox) },
         h('div', { style: C.blockHead }, label + ' · ' + formatCharsTokens(text.length)),
         h('div', { style: Object.assign({}, C.blockText, props.wide ? C.blockWide : C.blockClip) }, text || '（空）')
@@ -737,19 +1087,156 @@ window.__ModuleLoader__.load({
     function FoldItem(props) {
       var item = props.item || {}
       var opened = useLazyOpen()
+      var ownRef = react.useRef(null)
+      // 跳转落点：这一段的段号对上了就展开、滚过去、描一下边。
+      var focus = props.focus
+      var focusHere = focus && typeof focus.part === 'number' && focus.part === props.index
+      var flash = useReveal(ownRef, focusHere, focusHere ? focus.gen : 0, true)
       var seq = item.seq === null || item.seq === undefined ? '?' : item.seq
       var blocks = Array.isArray(item.blocks) ? item.blocks : []
       var kindPart = blocks[0] || {}
       var kindLabel = recallKindLabel({ kind: kindPart.kind || 'text', name: kindPart.name || '' })
       var head = '第 ' + props.index + ' 段 · #' + seq + ' · [' + kindLabel + '] · ' + formatCharsTokens(item.chars)
-      return h('details', { style: C.itemBox, onToggle: opened[1] },
-        h('summary', { style: C.itemSummary }, head),
+      // 折叠原文里的召回调用也标出来：段头一行能看出这段曾在哪次召回里被取回。
+      // 以前是一串灰字拼在段头后面，混在等宽清单里看不出边界，现在与条目上的标记同规格。
+      var calls = Array.isArray(item.recallCalls) ? item.recallCalls : []
+      var callTags = []
+      for (var ci = 0; ci < calls.length && ci < 2; ci += 1) {
+        callTags.push(h('span', {
+          key: 'rc' + ci,
+          style: Object.assign({}, C.tag, recallCallStyle(calls[ci]), CHIP_CLICK),
+          title: recallCallTitle(calls[ci]) + '；点开跳到被召回的段',
+          onClick: (function (call) {
+            return function (event) {
+              event.preventDefault()
+              event.stopPropagation()
+              openCallRefs(call)
+            }
+          })(calls[ci]),
+        }, recallChipLabel(calls[ci])))
+      }
+      if (calls.length > 2) {
+        callTags.push(h('span', {
+          key: 'rcmore',
+          style: Object.assign({}, C.tag, RECALL_TAG_STYLE),
+          title: '还有 ' + (calls.length - 2) + ' 次召回调用',
+        }, '另 ' + (calls.length - 2) + ' 次'))
+      }
+      // 方向相反的另一种标记：这一段被后来的分段召回取回过几次（不是它内部发起的调用）。
+      var recalled = typeof props.recallCount === 'number' && props.recallCount > 0 ? props.recallCount : 0
+      var refs = Array.isArray(props.refs) ? props.refs : []
+      // 这一段只是被关键词检索点到过：检索没有返回原文，所以与被召回分开标、分开数。
+      var searchRows = props.searchedParts && typeof props.searchedParts === 'object' ? props.searchedParts[props.index] : null
+      var searched = Array.isArray(searchRows) ? searchRows.length : 0
+      var titleBits = []
+      if (recalled > 0) titleBits.push('这一段被 fold_recall 取回 ' + recalled + ' 次')
+      if (searched > 0) titleBits.push('这一段被关键词检索命中 ' + searched + ' 次（检索不返回原文）')
+      if (calls.length > 0) titleBits.push(calls.map(recallCallTitle).join('\n'))
+      return h('details', { ref: ownRef, style: flash ? Object.assign({}, C.itemBox, FLASH_STYLE) : C.itemBox, onToggle: opened[1] },
+        // 收起行默认半透明；行里放了彩色标签，父级的透明度会把标签一起压灰，所以这里改成不透明，
+        // 灰度只落在段头文字上——标签必须保持标签的颜色。
+        h('summary', { style: Object.assign({}, C.itemSummary, { opacity: 1 }), title: titleBits.length > 0 ? titleBits.join('\n') : undefined },
+          h('span', { style: { opacity: 0.72 } }, head),
+          callTags.length > 0
+            ? h('span', { style: { display: 'inline-flex', gap: '4px', flexWrap: 'wrap', marginLeft: '6px' } }, callTags)
+            : null,
+          recalled > 0
+            ? h('span', {
+                style: Object.assign({}, C.tag, RECALLED_TAG_STYLE, { marginLeft: '6px' }, refs.length > 0 ? CHIP_CLICK : {}),
+                title: refs.length > 0 ? '这一段被取回 ' + recalled + ' 次；点开看是哪几次调用' : '这一段被取回 ' + recalled + ' 次',
+                onClick: refs.length > 0
+                  ? function (event) {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      // 这一段自己就是反查的起点：把它的开头一起带进面板。
+                      openPartRefs(props.partRefs, props.index, segmentPreview(blocks[0] && blocks[0].text))
+                    }
+                  : undefined,
+              }, '被召回 ' + recalled + ' 次')
+            : null,
+          searched > 0
+            ? h('span', {
+                style: Object.assign({}, C.tag, SEARCH_TAG_STYLE, { marginLeft: '6px' }, CHIP_CLICK),
+                title: '这一段被关键词检索命中 ' + searched + ' 次；点开看是哪几次检索',
+                onClick: function (event) {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  openSearchRefs(props.searchedParts, props.searchedRefs, props.index, segmentPreview(blocks[0] && blocks[0].text))
+                },
+              }, '被检索 ' + searched + ' 次')
+            : null
+        ),
         opened[0] ? h('div', { style: C.itemBody }, h(BlockList, { blocks: item.blocks, wide: props.wide })) : null
       )
     }
 
+    // 回复的 markdown 标题：与 lib/markdown.js 同一套规则（ATX 标题、跳过代码块、至少两个标题）。
+    // 只用在「需要分段」的长回复上；短回复仍整段展示，和召回行为一致。
+    function headingLines(text) {
+      var lines = String(text === null || text === undefined ? '' : text).split('\n')
+      var out = []
+      var fence = ''
+      for (var i = 0; i < lines.length; i += 1) {
+        var line = lines[i]
+        var fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+        if (fenceMatch) {
+          var mark = fenceMatch[1]
+          var rest = fenceMatch[2].trim()
+          if (!fence) fence = mark
+          else if (rest === '' && mark.charAt(0) === fence.charAt(0) && mark.length >= fence.length) fence = ''
+          continue
+        }
+        if (fence) continue
+        var heading = line.match(/^ {0,3}(#{1,6})(?:[ \t\u3000]+(.*?))?[ \t\u3000]*$/)
+        if (!heading) continue
+        var title = String(heading[2] || '').replace(/[ \t\u3000]+#+[ \t\u3000]*$/, '').trim()
+        if (!title) continue
+        out.push({ line: i, title: title })
+      }
+      return out
+    }
+
+    function splitReplySections(text) {
+      var value = String(text === null || text === undefined ? '' : text)
+      var lines = value.split('\n')
+      var headings = headingLines(value)
+      if (headings.length < 2) return null
+      var sections = []
+      if (headings[0].line > 0) {
+        var intro = lines.slice(0, headings[0].line).join('\n').trim()
+        if (intro) sections.push(intro)
+      }
+      for (var i = 0; i < headings.length; i += 1) {
+        var from = headings[i].line
+        var to = i + 1 < headings.length ? headings[i + 1].line : lines.length
+        var body = lines.slice(from, to).join('\n').replace(/[ \t\n]+$/, '')
+        if (body) sections.push(body)
+      }
+      return sections
+    }
+
+    // 一段自己发起的调用：块归属由服务端随段下发（recallCallBlocks 是「第几次调用来自第几个块」）。
+    // 模型先思考再调用时，一条消息会切成思考段与调用段两段，标记只该落在调用段上——
+    // 以前按条目取调用，两段都是同一串 chip，等于把标记撒了一地。
+    // 老数据没有块归属时退回「调用块整条带走」：至少不会落到思考段上。
+    function callsOfBlock(item, blockIndex, block) {
+      if (!block || (block.kind || 'text') !== 'call') return []
+      var calls = Array.isArray(item && item.recallCalls) ? item.recallCalls : []
+      if (calls.length === 0) return []
+      var owners = Array.isArray(item && item.recallCallBlocks) ? item.recallCallBlocks : null
+      if (!owners || owners.length !== calls.length) return calls
+      var out = []
+      for (var i = 0; i < calls.length; i += 1) if (owners[i] === blockIndex) out.push(calls[i])
+      return out
+    }
+
     // 折叠原文按召回时的形态展示：整段够小就直接给全文，超过就先给目录（与 fold_recall 一致）。
-    function foldPartsOf(record) {
+    // 长 markdown 回复按标题切段，UI 里的段号才能和实际召回对得上。
+    function foldPartsOf(record, options) {
+      var settings = options || {}
+      var splitChars = typeof settings.replySplitChars === 'number' && settings.replySplitChars > 0 ? settings.replySplitChars : 0
+      // 检查点里回复没被截断时召回不再返回回复段（重复内容）；段号必须同样跳过，否则整份对不上。
+      var skipReply = record && record.replyTruncated === false
       var items = Array.isArray(record && record.items) ? record.items : []
       var parts = []
       for (var i = 0; i < items.length; i += 1) {
@@ -758,10 +1245,64 @@ window.__ModuleLoader__.load({
         for (var j = 0; j < blocks.length; j += 1) {
           var block = blocks[j] || {}
           var text = typeof block.text === 'string' ? block.text : ''
-          parts.push({ no: parts.length + 1, seq: item.seq, kind: block.kind || 'text', name: block.name || '', text: text, chars: text.length })
+          var kind = block.kind || 'text'
+          if (skipReply && kind === 'reply') continue
+          // 记录里的回复正文带 '[回复] ' 前缀；切节前先摘掉，否则第一行标题被前缀挡住，标题就少一个。
+          var body = text
+          var prefix = ''
+          if (kind === 'reply' && text.indexOf('[回复] ') === 0) {
+            prefix = '[回复] '
+            body = text.slice(prefix.length)
+          }
+          var sections = kind === 'reply' && splitChars > 0 && body.length > splitChars ? splitReplySections(body) : null
+          if (sections) {
+            for (var k = 0; k < sections.length; k += 1) {
+              parts.push({ no: parts.length + 1, seq: item.seq, kind: kind, name: block.name || '', text: prefix + sections[k], chars: sections[k].length })
+            }
+            continue
+          }
+          // 段里的召回调用随段一起带出来：只带这一段自己的调用（见 callsOfBlock）。
+          parts.push({
+            no: parts.length + 1,
+            seq: item.seq,
+            kind: kind,
+            name: block.name || '',
+            text: text,
+            chars: text.length,
+            calls: callsOfBlock(item, j, block),
+          })
         }
       }
       return parts
+    }
+
+    // 引用面板里的段预览：只给开头一段，别把整段搬进弹窗。
+    // 段正文自带「[类型] 」前缀，预览里去掉——那一行旁边已经写着 #段号与类型。
+    function segmentPreview(text, limit) {
+      var flat = String(text === null || text === undefined ? '' : text).replace(/^\[[^\]]*\]\s*/, '')
+      if (!flat.trim()) return ''
+      var got = preview(flat, limit || 120)
+      return got === '（没有文字）' ? '' : got
+    }
+
+    // 引用落点那一段的正文：按条目 index 找到检查点，再按召回同一套切段规则取第 part 段。
+    function segmentPreviewOf(entries, target, config) {
+      if (!target || typeof target.part !== 'number' || target.part <= 0) return ''
+      var list = Array.isArray(entries) ? entries : []
+      var wantIndex = typeof target.i === 'number' ? target.i : -1
+      var settings = config || {}
+      var maxTokens = typeof settings.maxRecallTokens === 'number' && settings.maxRecallTokens > 0 ? settings.maxRecallTokens : 1000
+      for (var i = 0; i < list.length; i += 1) {
+        var entry = list[i] || {}
+        if (entry.isCheckpoint !== true || !entry.foldRecord) continue
+        if (typeof entry.index === 'number' && entry.index !== wantIndex) continue
+        var parts = foldPartsOf(entry.foldRecord, { replySplitChars: maxTokens * 4 })
+        for (var p = 0; p < parts.length; p += 1) {
+          if (parts[p].no === target.part) return segmentPreview(parts[p].text)
+        }
+        return ''
+      }
+      return ''
     }
 
     function recallKindLabel(part) {
@@ -770,22 +1311,470 @@ window.__ModuleLoader__.load({
       return label
     }
 
-    function recallIndexLines(parts, previewChars) {
+    // 召回 chip 只显示「取哪一段」，完整参数放 title：条目头一行要能扫读。
+    function recallQueryText(query) {
+      var text = String(query === null || query === undefined ? '' : query).replace(/\s+/g, ' ').trim()
+      return text.length <= 24 ? text : text.slice(0, 24) + '…'
+    }
+
+    // 段号压成区间：#195-#207、#1,#3-#5。调用 chip、结果头与原文目录共用同一种写法，
+    // 同一个段在页面上到处都长一个样，扫一眼就能对上。
+    function compactRanges(numbers) {
+      var list = []
+      var source = Array.isArray(numbers) ? numbers : []
+      for (var i = 0; i < source.length; i += 1) {
+        var value = Number(source[i])
+        if (!isFinite(value) || value <= 0) continue
+        list.push(Math.floor(value))
+      }
+      list.sort(function (a, b) { return a - b })
+      var out = []
+      var start = null
+      var prev = null
+      for (var j = 0; j < list.length; j += 1) {
+        var no = list[j]
+        if (no === prev) continue
+        if (start === null) { start = no; prev = no; continue }
+        if (no === prev + 1) { prev = no; continue }
+        out.push(start === prev ? '#' + start : '#' + start + '-#' + prev)
+        start = no
+        prev = no
+      }
+      if (start !== null) out.push(start === prev ? '#' + start : '#' + start + '-#' + prev)
+      return out.join(',')
+    }
+
+    function callSegmentCount(call) {
+      if (call && typeof call.segmentCount === 'number' && call.segmentCount > 0) return Math.floor(call.segmentCount)
+      return call && Array.isArray(call.segments) ? call.segments.length : 0
+    }
+
+    // 服务端按召回的切段规则把 parts / query 解析成具体段号，客户端不再猜选择器。
+    // 解析不出段号时返回空串，chip 退回显示原始参数（老数据没有这个字段）。
+    function callSegmentText(call) {
+      var numbers = call && Array.isArray(call.segments) ? call.segments : []
+      var count = callSegmentCount(call)
+      var ranges = compactRanges(numbers)
+      if (ranges) return '段 ' + ranges + (count > numbers.length ? ' 等 ' + count + ' 段' : '')
+      return count > 0 ? count + ' 段' : ''
+    }
+
+    function recallChipLabel(call) {
+      var id = call && call.id ? String(call.id) : ''
+      var query = call && call.query ? String(call.query) : ''
+      var parts = call && call.parts ? String(call.parts) : ''
+      var outcome = call && call.outcome ? String(call.outcome) : ''
+      if (!id) {
+        if (!query) return '检索'
+        var hitFolds = typeof call.searchFoldCount === 'number' ? call.searchFoldCount : 0
+        var hitParts = typeof call.searchPartCount === 'number' ? call.searchPartCount : 0
+        return '检索「' + recallQueryText(query) + '」' +
+          (hitParts > 0 ? ' · ' + (hitFolds > 0 ? hitFolds + ' 折叠 ' : '') + hitParts + ' 段' : '')
+      }
+      var label = '召回 ' + id
+      var count = callSegmentCount(call)
+      // 整段 / 目录 / 失败这三种结果写在工具返回里，说清楚「这次到底给了什么」：
+      // 不给段号，免得把「只给了目录」读成「取回了这些段」。
+      if (outcome === 'direct') return label + ' · 整段' + (count > 0 ? ' ' + count + ' 段' : '')
+      if (outcome === 'index') {
+        // 目录本身会被截断：列出的段数 / 总段数一起写，免得把「29 行」读成「只有 29 段」。
+        var total = typeof call.totalParts === 'number' && call.totalParts > 0 ? call.totalParts : 0
+        var shown = count > 0 ? count + (total > count ? '/' + total : '') : (total > 0 ? String(total) : '')
+        return label + ' · 目录' + (shown ? ' ' + shown + ' 段' : '')
+      }
+      if (outcome === 'error') return label + ' · 未取回'
+      var segments = callSegmentText(call)
+      // 段号优先：parts 写的是 reply / 3-5 这类选择器，解析后的段号才是「取过哪几段」。
+      if (segments) return label + ' · ' + segments
+      if (parts) return label + ' · 段 ' + parts
+      if (query) return label + ' · 筛「' + recallQueryText(query) + '」'
+      return label
+    }
+
+    function recallCallTitle(call) {
+      var via = call && call.via ? '在 ' + call.via + ' 里调用' : '直接调用'
+      var fields = []
+      if (call && call.id) fields.push('id=' + JSON.stringify(call.id))
+      if (call && call.query) fields.push('query=' + JSON.stringify(call.query))
+      if (call && call.parts) fields.push('parts=' + JSON.stringify(call.parts))
+      var numbers = call && Array.isArray(call.segments) ? call.segments : []
+      var ranges = compactRanges(numbers)
+      var count = callSegmentCount(call)
+      if (ranges) fields.push('取回 ' + ranges + (count > numbers.length ? ' 等 ' + count + ' 段' : ''))
+      // 工具结果写明的结果形状：整段、只给目录、失败。参数里看不出来，只有结果里写着。
+      var outcome = call && call.outcome ? String(call.outcome) : ''
+      if (outcome === 'direct') fields.push('整段返回')
+      else if (outcome === 'index') fields.push('只给目录（共 ' + (call && call.totalParts ? call.totalParts : count) + ' 段，没有返回原文）')
+      else if (outcome === 'error') fields.push('未取回：' + ((call && call.note) || '工具返回错误'))
+      else if (outcome === 'search') fields.push('关键词检索（没有返回原文）')
+      return via + ' fold_recall' + (fields.length ? '：' + fields.join('，') : '（参数未解析）')
+    }
+
+    // 检索调用没有单一折叠编号：它命中的是一条条折叠的分段目录。
+    // 所以引用分两层——每条折叠一行「分段目录」，再逐段列出命中的段号；
+    // 目录里的段号就是检索命中的段号，两边能对上。
+    function openSearchCallRefs(call) {
+      if (!NAV.refs) return
+      var hits = Array.isArray(call.searchHits) ? call.searchHits : []
+      var items = []
+      var unlisted = 0
+      for (var i = 0; i < hits.length; i += 1) {
+        var hit = hits[i] || {}
+        var loc = hit.loc || null
+        if (!loc) continue
+        var numbers = Array.isArray(hit.numbers) ? hit.numbers : []
+        items.push({
+          label: hit.id + '（第 ' + (hit.turn || '?') + ' 轮）· 分段目录 · 命中 ' + (hit.count || 0) + '/' + (hit.totalParts || 0) + ' 段',
+          target: { o: loc.o, i: loc.i, dir: true },
+        })
+        for (var k = 0; k < numbers.length && k < 6; k += 1) {
+          items.push({ label: hit.id + ' 段 #' + numbers[k], target: { o: loc.o, i: loc.i, part: numbers[k] } })
+        }
+        if (typeof hit.unlisted === 'number' && hit.unlisted > 0) unlisted += hit.unlisted
+      }
+      var note = items.length === 0
+        ? '这次检索没有命中任何折叠（或命中的折叠不在这份历史里）。'
+        : '点一条跳到那条折叠的分段目录，或那一段。'
+      if (unlisted > 0) note += '另有 ' + unlisted + ' 段命中但没列出来（用 parts 区间选）。'
+      if (typeof call.searchMoreFolds === 'number' && call.searchMoreFolds > 0) note += '这次检索还有 ' + call.searchMoreFolds + ' 条更早的折叠没列出。'
+      NAV.refs({ title: '检索调用 · ' + recallChipLabel(call), items: items, note: note })
+    }
+
+    // 引用面板的两类入口：从调用跳到被召回的段，从段跳回调用它的地方。
+    // 面板本身由 ModelView 渲染，这里只负责把「跳去哪」整理成一串可点的条目。
+    function openCallRefs(call) {
+      if (!call || !NAV.refs) return
+      // 只给 query 的检索：命中落在别的折叠的分段目录上，走另一条路。
+      if (!call.id) {
+        openSearchCallRefs(call)
+        return
+      }
+      var foldLoc = call && call.foldLoc ? call.foldLoc : null
+      var items = []
+      var numbers = Array.isArray(call.segments) ? call.segments : []
+      if (foldLoc && numbers.length > 0) {
+        for (var i = 0; i < numbers.length && i < 60; i += 1) {
+          items.push({
+            label: '段 #' + numbers[i] + (call.outcome === 'index' ? '（目录里的段）' : ''),
+            target: { o: foldLoc.o, i: foldLoc.i, part: numbers[i] },
+          })
+        }
+      } else if (foldLoc) {
+        items.push({ label: '这条折叠的检查点', target: { o: foldLoc.o, i: foldLoc.i } })
+      }
+      NAV.refs({
+        title: '召回调用 · ' + recallChipLabel(call),
+        items: items,
+        note: items.length > 0 ? '点一条跳到被召回的段。' : '这次调用没有落到具体的段上。',
+      })
+    }
+
+    // 段号 -> 调用落点：同一次调用的多段并成一条，按轮次与折叠编号列出来。
+    // onlyNo 只列某一段自己的引用：从一段反查时，别把同一份折叠里别的段也叫进来。
+    // 落点精确到段（part）：调用发生在折叠原文里时，跳过去要打开那一段，而不是只打开检查点。
+    function partRefItems(table, onlyNo) {
+      var source = table && typeof table === 'object' ? table : {}
+      var only = typeof onlyNo === 'number' && onlyNo > 0 ? Math.floor(onlyNo) : 0
+      var groups = {}
+      var order = []
+      for (var key in source) {
+        if (!Object.prototype.hasOwnProperty.call(source, key)) continue
+        var no = Number(key)
+        if (!isFinite(no) || no <= 0) continue
+        if (only > 0 && no !== only) continue
+        var refs = Array.isArray(source[key]) ? source[key] : []
+        for (var i = 0; i < refs.length; i += 1) {
+          var ref = refs[i] || {}
+          if (typeof ref.o !== 'number' || typeof ref.i !== 'number') continue
+          var part = typeof ref.part === 'number' && ref.part > 0 ? Math.floor(ref.part) : 0
+          var id = ref.o + ':' + ref.i + ':' + part
+          if (!groups[id]) {
+            groups[id] = { o: ref.o, i: ref.i, part: part, t: typeof ref.t === 'number' ? ref.t : ref.o, fold: ref.id || '', nos: [] }
+            order.push(id)
+          }
+          groups[id].nos.push(Math.floor(no))
+        }
+      }
+      order.sort(function (a, b) {
+        var left = groups[a]
+        var right = groups[b]
+        return left.o - right.o || left.i - right.i || left.part - right.part
+      })
+      return order.map(function (id) {
+        var row = groups[id]
+        var ranges = compactRanges(row.nos)
+        return {
+          label: '第 ' + row.t + ' 轮 · ' + (row.fold ? '召回 ' + row.fold : '检索') + (ranges ? ' · 段 ' + ranges : '') +
+            (row.part > 0 ? ' · 调用在第 ' + row.part + ' 段' : ''),
+          target: row.part > 0 ? { o: row.o, i: row.i, part: row.part } : { o: row.o, i: row.i },
+        }
+      })
+    }
+
+    // preview 是「这一段自己的开头」：从段这一端反查调用时，段号与正文一起摆出来，
+    // 否则几行引用指向哪里全靠记忆。
+    function openPartRefs(table, no, previewText) {
+      if (!NAV.refs) return
+      var items = partRefItems(table, no)
+      NAV.refs({
+        title: (no ? '第 ' + no + ' 段' : '这段折叠') + '被谁召回过',
+        items: items,
+        preview: typeof previewText === 'string' ? previewText : '',
+        note: items.length > 0 ? '点一条跳到那次调用所在的位置。' : '没有召回到这一段的记录。',
+      })
+    }
+
+    // 轮卡片上的合计标签点开时，这一轮的正文还没取：条目按需拉回来再列。
+    function entryNameOf(entry) {
+      var source = entry || {}
+      if (source.isCheckpoint) return '折叠摘要 ' + (source.foldId || '')
+      if (source.isPin) return '重要消息「' + (source.pinLabel || '') + '」'
+      return source.roleLabel || source.role || '消息'
+    }
+
+    // 一个条目里所有的召回调用：条目自己的块，加上折叠原文里的（已被折掉的调用）。
+    function callsOfEntry(entry) {
+      var source = entry || {}
+      var out = []
+      var calls = Array.isArray(source.recallCalls) ? source.recallCalls : []
+      for (var i = 0; i < calls.length; i += 1) out.push(calls[i])
+      var record = source.foldRecord
+      var items = record && Array.isArray(record.items) ? record.items : []
+      for (var j = 0; j < items.length; j += 1) {
+        var itemCalls = Array.isArray(items[j] && items[j].recallCalls) ? items[j].recallCalls : []
+        for (var k = 0; k < itemCalls.length; k += 1) out.push(itemCalls[k])
+      }
+      return out
+    }
+
+    // 这一轮的召回调用：每条回答「去哪儿找这次调用」。调用落在折叠原文里时精确到那一段，
+    // 跳过去会打开检查点、展开折叠原文、再展开那一段，而不是只停在检查点上。
+    function turnCallItems(entries, ordinal) {
+      var list = Array.isArray(entries) ? entries : []
+      var out = []
+      for (var i = 0; i < list.length; i += 1) {
+        var entry = list[i] || {}
+        var index = typeof entry.index === 'number' ? entry.index : 0
+        var calls = callsOfEntry(entry)
+        for (var j = 0; j < calls.length; j += 1) {
+          var call = calls[j] || {}
+          var part = typeof call.partNo === 'number' && call.partNo > 0 ? Math.floor(call.partNo) : 0
+          out.push({
+            label: entryNameOf(entry) + ' · ' + recallChipLabel(call) + (part > 0 ? ' · 调用在第 ' + part + ' 段' : ''),
+            target: part > 0 ? { o: ordinal, i: index, part: part } : { o: ordinal, i: index },
+          })
+        }
+      }
+      return out
+    }
+
+    // 这一轮被后来的调用取回过哪些段：把检查点的引用表合成一份，一条调用只出现一次。
+    function turnRecalledItems(entries) {
+      var list = Array.isArray(entries) ? entries : []
+      var merged = {}
+      for (var i = 0; i < list.length; i += 1) {
+        var table = list[i] && list[i].partRefs
+        if (!table || typeof table !== 'object') continue
+        for (var no in table) {
+          if (!Object.prototype.hasOwnProperty.call(table, no)) continue
+          var rows = Array.isArray(table[no]) ? table[no] : []
+          if (rows.length === 0) continue
+          merged[no] = (merged[no] || []).concat(rows)
+        }
+      }
+      return partRefItems(merged)
+    }
+
+    // 这一轮里被检索过的分段目录：把检查点上的检索引用合成一份，一条检索只出现一次。
+    function turnSearchedItems(entries) {
+      var list = Array.isArray(entries) ? entries : []
+      var rows = []
+      for (var i = 0; i < list.length; i += 1) {
+        var entry = list[i] || {}
+        var refs = Array.isArray(entry.searchedRefs) ? entry.searchedRefs : []
+        for (var j = 0; j < refs.length; j += 1) {
+          var row = refs[j] || {}
+          rows.push({
+            o: row.o, i: row.i, t: row.t, query: row.query || '',
+            count: row.count || 0, totalParts: row.totalParts || 0,
+            numbers: Array.isArray(row.numbers) ? row.numbers : [],
+            fold: entry.foldId || '',
+          })
+        }
+      }
+      return searchRefItems(rows)
+    }
+
+    // 条目级标记：直接调用逐次列出（最多 4 个），折叠原文里的调用只报次数，被召回次数只对检查点有意义。
+    function recallEntryTags(entry, onOpen, onSearch) {
+      var source = entry || {}
+      var out = []
+      var calls = Array.isArray(source.recallCalls) ? source.recallCalls : []
+      var shown = calls.slice(0, 4)
+      for (var i = 0; i < shown.length; i += 1) {
+        var call = shown[i] || {}
+        out.push(h('span', {
+          key: 'rc' + i,
+          style: Object.assign({}, C.tag, recallCallStyle(call)),
+          title: recallCallTitle(call),
+        }, recallChipLabel(call)))
+      }
+      if (calls.length > shown.length) {
+        out.push(h('span', {
+          key: 'rcmore',
+          style: Object.assign({}, C.tag, RECALL_TAG_STYLE),
+          title: '还有 ' + (calls.length - shown.length) + ' 次召回调用',
+        }, '另 ' + (calls.length - shown.length) + ' 次'))
+      }
+      var folded = typeof source.foldedRecallCount === 'number' ? source.foldedRecallCount : 0
+      if (folded > 0) {
+        out.push(h('span', {
+          key: 'foldedrc',
+          style: Object.assign({}, C.tag, RECALL_TAG_STYLE),
+          title: '折叠原文里有 ' + folded + ' 次召回调用，已随原文一起收起',
+        }, '含召回 ' + folded + ' 次'))
+      }
+      var foldedSearch = typeof source.foldedSearchCount === 'number' ? source.foldedSearchCount : 0
+      if (foldedSearch > 0) {
+        out.push(h('span', {
+          key: 'foldedsr',
+          style: Object.assign({}, C.tag, SEARCH_TAG_STYLE),
+          title: '折叠原文里有 ' + foldedSearch + ' 次关键词检索',
+        }, '含检索 ' + foldedSearch + ' 次'))
+      }
+      var recalled = typeof source.recalledCount === 'number' ? source.recalledCount : 0
+      var recalledPartCount = typeof source.recalledPartCount === 'number' ? source.recalledPartCount : 0
+      if (recalled > 0) {
+        out.push(h('span', {
+          key: 'recalled',
+          style: Object.assign({}, C.tag, RECALLED_TAG_STYLE, typeof onOpen === 'function' ? CHIP_CLICK : {}),
+          title: '这段折叠被召回 ' + recalled + ' 次' +
+            (recalledPartCount > 0 ? '，分段召回共取回 ' + recalledPartCount + ' 段次（段号见下方原文列表）' : '') +
+            '：取回的是原文，检查点本身没有被重发' +
+            (typeof onOpen === 'function' ? '；点开看是哪几次调用取回的' : ''),
+          onClick: typeof onOpen === 'function'
+            ? function (event) { event.preventDefault(); event.stopPropagation(); onOpen() }
+            : undefined,
+        }, '被召回 ' + recalled + ' 次' + (recalledPartCount > 0 ? ' · ' + recalledPartCount + ' 段次' : '')))
+      }
+      // 这条折叠的分段目录被关键词检索用过几次：检索没返回原文，所以是另一种颜色、另一种数。
+      var searchedCount = typeof source.searchedCount === 'number' ? source.searchedCount : 0
+      var searchedPartCount = typeof source.searchedPartCount === 'number' ? source.searchedPartCount : 0
+      if (searchedCount > 0) {
+        out.push(h('span', {
+          key: 'searched',
+          style: Object.assign({}, C.tag, SEARCH_TAG_STYLE, typeof onSearch === 'function' ? CHIP_CLICK : {}),
+          title: '这张分段目录被 ' + searchedCount + ' 次关键词检索用过' +
+            (searchedPartCount > 0 ? '，命中 ' + searchedPartCount + ' 段次（检索不返回原文）' : '（检索不返回原文）') +
+            (typeof onSearch === 'function' ? '；点开看是哪几次检索' : ''),
+          onClick: typeof onSearch === 'function'
+            ? function (event) { event.preventDefault(); event.stopPropagation(); onSearch() }
+            : undefined,
+        }, '被检索 ' + searchedCount + ' 次' + (searchedPartCount > 0 ? ' · ' + searchedPartCount + ' 段次' : '')))
+      }
+      return out
+    }
+
+    // 段号被关键词检索命中的次数：目录行里的「检索×N」，与「召回×N」并排。
+    function partSearchCount(searchedParts, no) {
+      if (!searchedParts || typeof searchedParts !== 'object') return 0
+      var rows = searchedParts[no]
+      return Array.isArray(rows) ? rows.length : 0
+    }
+
+    // 被检索的反向引用：这一段 / 这张分段目录被哪几次关键词检索命中过。
+    // 行来自服务端：段级带关键词，折叠级还带命中数（命中 n/m 段、列出的段号）。
+    function searchRefItems(rows, onlyNo) {
+      var list = Array.isArray(rows) ? rows : []
+      var groups = {}
+      var order = []
+      for (var i = 0; i < list.length; i += 1) {
+        var row = list[i] || {}
+        if (typeof row.o !== 'number' || typeof row.i !== 'number') continue
+        // 同一条消息里可能有多次检索：按「条目 + 调用所在段」分组，落点才精确到那一次。
+        var part = typeof row.part === 'number' && row.part > 0 ? Math.floor(row.part) : 0
+        var key = row.o + ':' + row.i + ':' + part
+        if (!groups[key]) {
+          groups[key] = {
+            o: row.o, i: row.i, part: part,
+            t: typeof row.t === 'number' ? row.t : row.o,
+            query: row.query || '', fold: row.fold || '', nos: [], count: 0, totalParts: 0,
+          }
+          order.push(key)
+        }
+        var group = groups[key]
+        if (!group.query && row.query) group.query = row.query
+        if (typeof row.count === 'number' && row.count > group.count) group.count = row.count
+        if (typeof row.totalParts === 'number' && row.totalParts > group.totalParts) group.totalParts = row.totalParts
+        var numbers = Array.isArray(row.numbers) ? row.numbers : (typeof onlyNo === 'number' && onlyNo > 0 ? [onlyNo] : [])
+        for (var k = 0; k < numbers.length; k += 1) group.nos.push(numbers[k])
+      }
+      order.sort(function (a, b) {
+        return groups[a].o - groups[b].o || groups[a].i - groups[b].i || groups[a].part - groups[b].part
+      })
+      return order.map(function (key) {
+        var row = groups[key]
+        var ranges = compactRanges(row.nos)
+        var hit = row.count > 0 ? '命中 ' + row.count + (row.totalParts > 0 ? '/' + row.totalParts : '') + ' 段' : ''
+        return {
+          label: '第 ' + row.t + ' 轮 · 检索' + (row.fold ? ' ' + row.fold : '') + (row.query ? '「' + recallQueryText(row.query) + '」' : '') +
+            (hit ? ' · ' + hit : '') + (ranges ? ' · 段 ' + ranges : '') +
+            (row.part > 0 ? ' · 调用在第 ' + row.part + ' 段' : ''),
+          target: row.part > 0 ? { o: row.o, i: row.i, part: row.part } : { o: row.o, i: row.i },
+        }
+      })
+    }
+
+    // 目录被检索：点目录行上的「检索×N」或折叠原文标题上的「被检索 N 次」都走这里。
+    function openSearchRefs(searchedParts, searchedRefs, no, previewText) {
+      if (!NAV.refs) return
+      var seg = typeof no === 'number' && no > 0 ? Math.floor(no) : 0
+      var rows = seg > 0
+        ? (searchedParts && Array.isArray(searchedParts[seg]) ? searchedParts[seg] : [])
+        : (Array.isArray(searchedRefs) ? searchedRefs : [])
+      var items = searchRefItems(rows, seg)
+      NAV.refs({
+        title: seg > 0 ? '第 ' + seg + ' 段被检索过' : '这张分段目录被检索过',
+        items: items,
+        preview: typeof previewText === 'string' ? previewText : '',
+        note: items.length > 0 ? '点一条跳到那次检索调用的位置。' : '没有检索命中过这里。',
+      })
+    }
+
+    function partRecallCount(recalledParts, no) {
+      if (!recalledParts || typeof recalledParts !== 'object') return 0
+      var value = recalledParts[no]
+      return typeof value === 'number' && value > 0 ? value : 0
+    }
+
+    function recallIndexLines(parts, previewChars, recalledParts, searchedParts) {
       return parts.map(function (part) {
+        var meta = '#' + part.no + ' [' + recallKindLabel(part) + '] ' + formatCharsTokens(part.chars)
+        // 目录行也带段级标记：扫一遍目录就能看出哪些段被取回过、哪些只被检索点到过。
+        var times = partRecallCount(recalledParts, part.no)
+        if (times > 0) meta += ' · 召回×' + times
+        var hits = partSearchCount(searchedParts, part.no)
+        if (hits > 0) meta += ' · 检索×' + hits
         var flat = part.text.replace(/^\[[^\]]*\]\s*/, '').replace(/\s+/g, ' ').trim()
-        var cut = flat.length <= previewChars ? flat : flat.slice(0, Math.max(0, previewChars)) + '…'
-        return '#' + part.no + ' [' + recallKindLabel(part) + '] ' + formatCharsTokens(part.chars) + '：' + (cut || '（空）')
+        if (!flat) return meta
+        // 与 lib/recall.js 同规则：预览比原文短才用预览，否则整行给原文。
+        var preview = flat.length <= previewChars ? flat : flat.slice(0, Math.max(0, previewChars)) + '…'
+        return meta + '：' + (preview.length < flat.length ? preview : flat)
       })
     }
 
     function recallPlan(record, config) {
       var settings = config || {}
-      var directTokens = typeof settings.recallDirectTokens === 'number' && settings.recallDirectTokens > 0 ? settings.recallDirectTokens : 500
       var previewTokens = typeof settings.recallIndexPreviewTokens === 'number' && settings.recallIndexPreviewTokens > 0 ? settings.recallIndexPreviewTokens : 25
-      var parts = foldPartsOf(record)
+      var maxRecallTokens = typeof settings.maxRecallTokens === 'number' && settings.maxRecallTokens > 0 ? settings.maxRecallTokens : 1000
+      var minRatio = typeof settings.minFoldRatio === 'number' && settings.minFoldRatio > 0 ? settings.minFoldRatio : 0.5
+      var parts = foldPartsOf(record, { replySplitChars: maxRecallTokens * 4 })
       var chars = parts.reduce(function (sum, part) { return sum + part.chars }, 0)
       var tokens = Math.round(chars / 4)
-      return { parts: parts, chars: chars, tokens: tokens, direct: tokens <= directTokens, directLimit: directTokens, previewChars: previewTokens * 4 }
+      // 与服务端同口径：每行在预览/原文间二选一；目录整体省不到原文的 minRatio 倍时整段返回。头部与合计按约 200 字估。
+      var indexChars = recallIndexLines(parts, previewTokens * 4).reduce(function (sum, line) { return sum + line.length + 1 }, 0) + 200
+      var direct = indexChars >= chars * minRatio
+      return { parts: parts, chars: chars, tokens: tokens, direct: direct, previewChars: previewTokens * 4 }
     }
 
     var RECALL_LINE_STYLE = {
@@ -799,31 +1788,197 @@ window.__ModuleLoader__.load({
       background: 'rgba(127,127,127,.08)',
     }
 
+    // 目录行里的「召回×N」是被召回次数的缩略写法。整行是等宽正文，只靠字号分不出来，
+    // 所以把这个记号单独染红：扫目录时它和段号一样是定位用的坐标。
+    var RECALLED_TEXT_STYLE = { color: RECALL_TEXT.recalled, fontWeight: 600 }
+    // 检索命中的段号用橘黄：与「召回×N」的红并排出现时，一眼能分出「取回过」和「只是找到了」。
+    var SEARCH_TEXT_STYLE = { color: RECALL_TEXT.search, fontWeight: 600 }
+
+    function recallCountNodes(line) {
+      // 目录行里两种记号：「召回×N」被取回过、'检索×N' 只在检索结果里被点到。各染各的色。
+      var pattern = /(召回×\d+|检索×\d+)/g
+      var out = []
+      var last = 0
+      var match
+      while ((match = pattern.exec(line))) {
+        if (match.index > last) out.push(line.slice(last, match.index))
+        out.push(h('span', {
+          key: 'm' + match.index,
+          style: match[1].charAt(0) === '检' ? SEARCH_TEXT_STYLE : RECALLED_TEXT_STYLE,
+        }, match[1]))
+        last = match.index + match[1].length
+      }
+      if (out.length === 0) return line
+      if (last < line.length) out.push(line.slice(last))
+      return out
+    }
+
+    // 清单超过一屏就交给滚动区。20 段 / 40 行以内一屏看得完，套壳只多一层嵌套滚动；
+    // 再多就要截住，否则页面高度随段数一路长下去，想滚到下面的内容得先滚过整份清单。
+    var PART_SCROLL_AFTER = 20
+    var LINE_SCROLL_AFTER = 40
+
     function FoldOriginal(props) {
       var record = props.record || {}
       var plan = recallPlan(record, props.config)
       var opened = useLazyOpen()
-      var head = '折叠掉的原文 · ' + plan.parts.length + ' 段 · 约 ' + formatChars(plan.chars) + '（≈' + formatTokens(plan.tokens) + ' token）' +
-        '（' + (plan.direct ? '召回时整段返回' : '召回时先给目录') + '，模型看不到）'
-      // 不再单列说明段：目录行本身就带段号/类型/字数/token/预览，整段模式靠每段头部标注。
-      var children = []
-      if (!plan.direct) {
-        var lines = recallIndexLines(plan.parts, plan.previewChars)
-        for (var li = 0; li < lines.length; li += 1) {
-          children.push(h('div', { key: 'idx' + li, style: RECALL_LINE_STYLE }, lines[li]))
+      var ownRef = react.useRef(null)
+      var dirRef = react.useRef(null)
+      // 落到「第几段」或「整张目录」时就展开这一层：段条目还没挂进 DOM，必须先打开才能滚过去。
+      var focus = props.focus
+      var focusPart = focus && typeof focus.part === 'number' ? focus.part : 0
+      var focusDir = !!(focus && focus.dir === true)
+      var focusGen = focus ? focus.gen : 0
+      useReveal(ownRef, focusPart > 0 || focusDir, focusGen, false)
+      var partRefs = props.partRefs && typeof props.partRefs === 'object' ? props.partRefs : {}
+      var hasRefs = false
+      for (var refKey in partRefs) {
+        if (Object.prototype.hasOwnProperty.call(partRefs, refKey)) {
+          hasRefs = true
+          break
         }
       }
+      var recalledParts = props.recalledParts && typeof props.recalledParts === 'object' ? props.recalledParts : {}
+      var searchedParts = props.searchedParts && typeof props.searchedParts === 'object' ? props.searchedParts : {}
+      var searchedRefs = Array.isArray(props.searchedRefs) ? props.searchedRefs : []
+      var recalledSegments = 0
+      var recalledTimes = 0
+      for (var key in recalledParts) {
+        if (!Object.prototype.hasOwnProperty.call(recalledParts, key)) continue
+        var times = partRecallCount(recalledParts, key)
+        if (times <= 0) continue
+        recalledSegments += 1
+        recalledTimes += times
+      }
+      var searchedSegments = 0
+      var searchedTimes = 0
+      for (var skey in searchedParts) {
+        if (!Object.prototype.hasOwnProperty.call(searchedParts, skey)) continue
+        var hits = partSearchCount(searchedParts, skey)
+        if (hits <= 0) continue
+        searchedSegments += 1
+        searchedTimes += hits
+      }
+      var searchedCount = typeof props.searchedCount === 'number' && props.searchedCount > 0 ? props.searchedCount : 0
+      var head = '折叠掉的原文 · ' + plan.parts.length + ' 段 · 约 ' + formatChars(plan.chars) + '（≈' + formatTokens(plan.tokens) + ' token）' +
+        '（' + (plan.direct ? '召回时整段返回' : '召回时先给目录') + '，模型看不到）'
+      // 目录被检索：这条折叠的分段目录被后来的关键词检索按段号用过几次。
+      var dirCount = searchedCount > 0 ? searchedCount : (searchedRefs.length > 0 ? searchedRefs.length : 0)
+      // 目录的展开状态自己管：跳转要能把它打开并滚过去，用户点开也要能收回去。
+      var directory = react.useState(false)
+      react.useEffect(function () {
+        if (!focusDir) return
+        if (!directory[0]) {
+          directory[1](true)
+          return
+        }
+        var node = dirRef.current
+        if (!node || typeof node.scrollIntoView !== 'function') return
+        var scroll = setTimeout(function () { node.scrollIntoView({ block: 'center', behavior: 'smooth' }) }, 80)
+        return function () { clearTimeout(scroll) }
+        // opened[0] 一起看：外层是先展开、目录节点才挂进 DOM 的。
+      }, [focusDir, focusGen, directory[0], opened[0]])
+      var children = []
+      if (!plan.direct) {
+        var lines = recallIndexLines(plan.parts, plan.previewChars, recalledParts, searchedParts)
+        var lineNodes = []
+        // 目录自己也占上下文：模型第一遍收到的就是这些行。收起时只写「N 行」，看不出这一面墙多大，
+        // 所以把目录自身的字数与 token 一起写着——和原文合计是两个数，别混。
+        var dirChars = 0
+        for (var li = 0; li < lines.length; li += 1) {
+          dirChars += lines[li].length + 1
+          lineNodes.push(h('div', { key: 'idx' + li, style: RECALL_LINE_STYLE }, recallCountNodes(lines[li])))
+        }
+        // 目录是「一面墙」：收起时只留一行，下面每段本来就是可折叠条目。
+        // 要按段号扫类型/字数时再点开，和召回时先给目录、再按段取回是同一个顺序。
+        children.push(h('details', {
+          key: 'idx',
+          ref: dirRef,
+          style: C.nested,
+          open: directory[0],
+          onToggle: function (event) { directory[1](event.currentTarget.open === true) },
+        },
+          h('summary', { style: Object.assign({}, C.nestedSummary, { opacity: 1 }) },
+            h('span', { style: { opacity: 0.7 } },
+              '分段目录 · ' + lines.length + ' 行 · ' + formatCharsTokens(dirChars) + ' · 召回时按这里的段号选'),
+            // 这张目录被关键词检索用过：段号就是检索命中的段号，点开看是哪几次检索。
+            dirCount > 0
+              ? h('span', {
+                  style: Object.assign({}, SEARCH_TEXT_STYLE, CHIP_CLICK),
+                  title: '这张分段目录被 ' + dirCount + ' 次关键词检索用过' +
+                    (searchedSegments > 0 ? '，其中 ' + searchedSegments + ' 段被命中 ' + searchedTimes + ' 次' : '') +
+                    '；点开看是哪几次检索',
+                  onClick: function (event) {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    openSearchRefs(searchedParts, searchedRefs, 0)
+                  },
+                }, ' · 被检索 ' + dirCount + ' 次')
+              : null
+          ),
+          // 目录本身也是一面墙：行数多时限高，别让「展开目录」也把页面拉长。
+          directory[0]
+            ? h('div', { style: lines.length > LINE_SCROLL_AFTER ? C.scrollBoxTight : C.nestedBody }, lineNodes)
+            : null
+        ))
+      }
+      var partNodes = []
       for (var pi = 0; pi < plan.parts.length; pi += 1) {
         var part = plan.parts[pi]
-        children.push(h(FoldItem, {
+        partNodes.push(h(FoldItem, {
           key: 'i' + pi,
-          item: { seq: part.seq, chars: part.chars, blocks: [{ kind: part.kind, name: part.name, text: part.text }] },
+          // 段内发起的召回调用随段一起带出来（foldPartsOf 从原文条目里接的）。
+          item: {
+            seq: part.seq,
+            chars: part.chars,
+            recallCalls: Array.isArray(part.calls) ? part.calls : [],
+            blocks: [{ kind: part.kind, name: part.name, text: part.text }],
+          },
           index: part.no,
+          recallCount: partRecallCount(recalledParts, part.no),
+          refs: Array.isArray(partRefs[part.no]) ? partRefs[part.no] : [],
+          partRefs: partRefs,
+          searchedParts: searchedParts,
+          searchedRefs: searchedRefs,
+          focus: focusPart === part.no ? focus : null,
           wide: props.wide,
         }))
       }
-      return h('details', { style: C.nested, onToggle: opened[1] },
-        h('summary', { style: C.nestedSummary }, head),
+      // 段条目多时整份清单进滚动区：展开面板只多一屏，页面的滚动条还在手里。
+      if (partNodes.length > PART_SCROLL_AFTER) {
+        children.push(h('div', {
+          key: 'parts',
+          style: C.scrollBox,
+          title: partNodes.length + ' 段，在框内滚动查看',
+        }, partNodes))
+      } else {
+        for (var pn = 0; pn < partNodes.length; pn += 1) children.push(partNodes[pn])
+      }
+      return h('details', { ref: ownRef, style: C.nested, onToggle: opened[1] },
+        h('summary', { style: Object.assign({}, C.nestedSummary, { opacity: 1 }) },
+          h('span', { style: { opacity: 0.7 } }, head),
+          recalledSegments > 0
+            ? h('span', {
+                style: Object.assign({}, RECALLED_TEXT_STYLE, hasRefs ? CHIP_CLICK : {}),
+                title: hasRefs ? '点开看是哪些调用取回了这些段' : '这些段被后面的召回取回过',
+                onClick: hasRefs
+                  ? function (event) { event.preventDefault(); event.stopPropagation(); openPartRefs(partRefs, 0) }
+                  : undefined,
+              }, ' · 其中 ' + recalledSegments + ' 段被召回 ' + recalledTimes + ' 次')
+            : null,
+          // 反方向的另一种标记：这些段只是被关键词检索点到过，原文并没有返回给模型。
+          searchedSegments > 0
+            ? h('span', {
+                style: Object.assign({}, SEARCH_TEXT_STYLE, CHIP_CLICK),
+                title: '这些段被关键词检索命中 ' + searchedTimes + ' 次（检索不返回原文）；点开看是哪几次检索',
+                onClick: function (event) {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  openSearchRefs(searchedParts, searchedRefs, 0)
+                },
+              }, ' · 其中 ' + searchedSegments + ' 段被检索 ' + searchedTimes + ' 次')
+            : null
+        ),
         opened[0] ? h('div', { style: C.nestedBody }, children) : null
       )
     }
@@ -832,6 +1987,11 @@ window.__ModuleLoader__.load({
       var entry = props.entry || {}
       var kind = entryKindOf(entry)
       var opened = useLazyOpen()
+      var ownRef = react.useRef(null)
+      // 跳转落点：条目序号对上了就展开、滚过去、描一下边。
+      var focus = props.focus
+      var focusHere = focus && typeof focus.i === 'number' && focus.i === entry.index
+      var flash = useReveal(ownRef, focusHere, focusHere ? focus.gen : 0, true)
       var role = entry.isCheckpoint
         ? '折叠摘要 ' + (entry.foldId || '')
         : entry.isPin
@@ -843,19 +2003,47 @@ window.__ModuleLoader__.load({
       meta.push(formatCharsTokens(entry.chars))
       var record = entry.foldRecord
       var hasOriginal = entry.isCheckpoint && record && Array.isArray(record.items) && record.items.length > 0
+      // 检查点的「被召回」标签点开就是引用面板：哪几次调用取回了这段折叠的哪几段。
+      // 只有服务端真的下发了引用表才做成可点，否则点开只会是一个空面板。
+      var recallTags = recallEntryTags(entry,
+        entry.partRefs && typeof entry.partRefs === 'object'
+          ? function () { openPartRefs(entry.partRefs, 0) }
+          : undefined,
+        entry.searchedRefs && Array.isArray(entry.searchedRefs)
+          ? function () { openSearchRefs(entry.searchedParts, entry.searchedRefs, 0) }
+          : undefined)
       var summary = h('summary', { style: C.entrySummary },
         h('div', { style: C.entryHead },
           h('span', { style: C.entryRole }, role),
+          recallTags.length > 0
+            ? h('span', { style: { display: 'inline-flex', gap: '4px', flexWrap: 'wrap' } }, recallTags)
+            : null,
           meta.map(function (text, index) { return h('span', { key: 'm' + index, style: C.entryMeta }, text) })
         ),
         h('div', { style: C.entryPeek }, preview(firstTextOf(entry), 140) || '（空）')
       )
-      return h('details', { style: Object.assign({}, C.entry, tint(kind)), onToggle: opened[1] },
+      return h('details', {
+        ref: ownRef,
+        style: flash ? Object.assign({}, C.entry, tint(kind), FLASH_STYLE) : Object.assign({}, C.entry, tint(kind)),
+        onToggle: opened[1],
+      },
         summary,
         opened[0]
           ? h('div', { style: C.entryBody },
               h(BlockList, { blocks: entry.blocks, wide: props.wide }),
-              hasOriginal ? h(FoldOriginal, { record: record, wide: props.wide, config: props.config }) : null
+              hasOriginal
+                ? h(FoldOriginal, {
+                    record: record,
+                    recalledParts: entry.recalledParts,
+                    partRefs: entry.partRefs,
+                    searchedParts: entry.searchedParts,
+                    searchedRefs: entry.searchedRefs,
+                    searchedCount: entry.searchedCount,
+                    focus: focusHere && (focus.part || focus.dir) ? focus : null,
+                    wide: props.wide,
+                    config: props.config,
+                  })
+                : null
             )
           : null
       )
@@ -1240,10 +2428,109 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 引用面板的段预览要读目标那一轮：按会话 + 轮次 + 数据版本缓存，
+    // 同一次打开只发一次请求，关掉再打开不重发；失败不留坏缓存。
+    var TURN_CACHE = {}
+    function loadTurnEntries(sessionId, ordinal, stamp) {
+      var key = String(sessionId || '') + '|' + ordinal + '|' + (typeof stamp === 'number' ? stamp : 0)
+      var hit = TURN_CACHE[key]
+      // 一律回 Promise：缓存命中也要能 .then，调用方不用判两次。
+      if (hit) return hit.promise
+      var slot = { status: 'loading', entries: [], error: '' }
+      slot.promise = fetch('/fold-turn?session=' + encodeURIComponent(sessionId || '') + '&ordinal=' + ordinal)
+        .then(readJson)
+        .then(function (result) {
+          slot.status = 'ready'
+          slot.entries = Array.isArray(result.entries) ? result.entries : []
+          return slot
+        })
+        .catch(function (error) {
+          slot.status = 'error'
+          slot.error = String(error && error.message ? error.message : error)
+          if (TURN_CACHE[key] === slot) delete TURN_CACHE[key]
+          return slot
+        })
+      TURN_CACHE[key] = slot
+      return slot.promise
+    }
+
+    // 轮正文按需拉：首包只带分组头与重要消息，展开这一轮时才取它的条目。
+    // 长会话单是各条消息的正文就有几十 MB，一次下发会让浏览器先卡在解析和内存上。
     function TurnCard(props) {
       var group = props.group || {}
       if (group.kind === 'system') return h(SystemCard, { group: group, wide: props.wide, current: props.current })
       var opened = useLazyOpen()
+      var ordinal = typeof group.ordinal === 'number' ? group.ordinal : -1
+      var stamp = typeof props.stamp === 'number' ? props.stamp : 0
+      var detailsRef = react.useRef(null)
+      // 目标轮次对上了就展开：正文随展开按需拉，拉回来之后 EntryView 再定位到具体条目。
+      var jumpFocus = props.focus
+      var focusHere = jumpFocus && jumpFocus.o === ordinal
+      useReveal(detailsRef, focusHere, focusHere ? jumpFocus.gen : 0, false)
+      var bodyState = react.useState({ status: 'idle', stamp: 0, entries: [], error: '' })
+      var body = bodyState[0]
+      var setBody = bodyState[1]
+      var attemptState = react.useState(0)
+
+      // 展开才拉；取过同一版数据就不再重复拉，刷新后 stamp 变化才重取。
+      // 关掉再打开会中断在途请求，所以这里不拦 loading 状态：重新打开就重新拉一次。
+      react.useEffect(function () {
+        if (!opened[0] || ordinal < 0) return
+        if (body.status === 'ready' && body.stamp === stamp) return
+        var alive = true
+        var controller = typeof AbortController === 'function' ? new AbortController() : null
+        setBody({ status: 'loading', stamp: stamp, entries: [], error: '' })
+        fetch('/fold-turn?session=' + encodeURIComponent(props.sessionId || '') + '&ordinal=' + ordinal, controller ? { signal: controller.signal } : undefined)
+          .then(readJson)
+          .then(function (result) {
+            if (!alive) return
+            setBody({ status: 'ready', stamp: stamp, entries: Array.isArray(result.entries) ? result.entries : [], error: '' })
+          })
+          .catch(function (error) {
+            if (!alive || (error && error.name === 'AbortError')) return
+            setBody({ status: 'error', stamp: stamp, entries: [], error: String(error && error.message ? error.message : error) })
+          })
+        return function () {
+          alive = false
+          if (controller) controller.abort()
+        }
+      }, [opened[0], ordinal, attemptState[0], stamp])
+
+      // 合计标签也能点：这一轮的正文按需拉，拉回来再列「哪几次调用 / 哪几段被取回」。
+      // 标签在 summary 里，点它必须先掐掉默认的展开——否则点标签只会把整轮展开。
+      var openTurnPanel = function (kind) {
+        if (!NAV.refs) return
+        var title = '第 ' + (typeof group.turn === 'number' ? group.turn : group.ordinal) + ' 轮 · ' +
+          (kind === 'calls' ? '召回调用' : kind === 'searched' ? '被检索的分段目录' : '被召回的段')
+        NAV.refs({ title: title, items: [], note: '正在读取这一轮的正文…' })
+        var gen = NAV.panelGen || 0
+        loadTurnEntries(props.sessionId, ordinal, stamp).then(function (slot) {
+          // 迟到的结果不再顶掉已经换过的面板（用户可能已经关了或点了别的标签）。
+          if ((NAV.panelGen || 0) !== gen) return
+          if (slot.status !== 'ready') {
+            NAV.refs({ title: title, items: [], note: '读取这一轮的正文失败：' + (slot.error || '未知原因') })
+            return
+          }
+          var items = kind === 'calls'
+            ? turnCallItems(slot.entries, ordinal)
+            : kind === 'searched' ? turnSearchedItems(slot.entries) : turnRecalledItems(slot.entries)
+          NAV.refs({
+            title: title,
+            items: items,
+            note: items.length === 0
+              ? '这一轮没有' + (kind === 'calls' ? '召回调用' : kind === 'searched' ? '被检索的目录' : '被召回的段') + '。'
+              : (kind === 'calls' ? '点一条跳到那次调用的位置。' : '点一条跳到那次调用的条目。'),
+          })
+        })
+      }
+      var chipClick = function (kind) {
+        return function (event) {
+          event.preventDefault()
+          event.stopPropagation()
+          openTurnPanel(kind)
+        }
+      }
+
       var label = typeof group.turn === 'number' ? '第 ' + group.turn + ' 轮' : '第 ' + (group.ordinal || 0) + ' 段'
       var tags = []
       var foldIds = Array.isArray(group.foldIds) ? group.foldIds : []
@@ -1252,6 +2539,49 @@ window.__ModuleLoader__.load({
       if (group.folded) tags.push(h('span', { key: 'folded', style: C.tag }, '已折叠'))
       else if (group.prePlugin) tags.push(h('span', { key: 'pre', style: C.tag }, '插件生效前 · 未折叠'))
       else tags.push(h('span', { key: 'none', style: C.tag }, group.short ? '内容较少 · 未折叠' : '未折叠'))
+      // 召回合计提到轮卡片头：展开前就能看出这一轮取回了什么、哪段被取回过。
+      var recallCallCount = typeof group.recallCallCount === 'number' ? group.recallCallCount : 0
+      if (recallCallCount > 0) {
+        tags.push(h('span', {
+          key: 'rcall',
+          style: Object.assign({}, C.tag, RECALL_TAG_STYLE, CHIP_CLICK),
+          title: '这一轮共 ' + recallCallCount + ' 次召回调用，含折叠原文里的调用；点开看是哪几次、跳到调用位置',
+          onClick: chipClick('calls'),
+        }, '召回 ' + recallCallCount + ' 次'))
+      }
+      var recallSearchCount = typeof group.recallSearchCount === 'number' ? group.recallSearchCount : 0
+      if (recallSearchCount > 0) {
+        tags.push(h('span', {
+          key: 'rsearch',
+          style: Object.assign({}, C.tag, SEARCH_TAG_STYLE),
+          title: '这一轮共 ' + recallSearchCount + ' 次关键词检索',
+        }, '检索 ' + recallSearchCount + ' 次'))
+      }
+      var recalledCount = typeof group.recalledCount === 'number' ? group.recalledCount : 0
+      var recalledPartCount = typeof group.recalledPartCount === 'number' ? group.recalledPartCount : 0
+      if (recalledCount > 0) {
+        tags.push(h('span', {
+          key: 'recalled',
+          style: Object.assign({}, C.tag, RECALLED_TAG_STYLE, CHIP_CLICK),
+          title: '这一轮的折叠被召回共 ' + recalledCount + ' 次' +
+            (recalledPartCount > 0 ? '，分段召回共取回 ' + recalledPartCount + ' 段次' : '') +
+            '；点开看是哪几次调用取回的',
+          onClick: chipClick('recalled'),
+        }, '被召回 ' + recalledCount + ' 次' + (recalledPartCount > 0 ? ' · ' + recalledPartCount + ' 段次' : '')))
+      }
+      // 被检索：这一轮的折叠分段目录被关键词检索用过几次。检索没返回原文，与被召回分开列。
+      var searchedCount = typeof group.searchedCount === 'number' ? group.searchedCount : 0
+      var searchedPartCount = typeof group.searchedPartCount === 'number' ? group.searchedPartCount : 0
+      if (searchedCount > 0) {
+        tags.push(h('span', {
+          key: 'searched',
+          style: Object.assign({}, C.tag, SEARCH_TAG_STYLE, CHIP_CLICK),
+          title: '这一轮的折叠分段目录被关键词检索用过 ' + searchedCount + ' 次' +
+            (searchedPartCount > 0 ? '，命中 ' + searchedPartCount + ' 段次（检索不返回原文）' : '') +
+            '；点开看是哪几次检索',
+          onClick: chipClick('searched'),
+        }, '被检索 ' + searchedCount + ' 次' + (searchedPartCount > 0 ? ' · ' + searchedPartCount + ' 段次' : '')))
+      }
       // 重要消息按时间顺序贴在它出现的这一轮旁边，不再在页顶做汇总。
       var pinLabels = Array.isArray(group.pinLabels) ? group.pinLabels : []
       for (var pi = 0; pi < pinLabels.length; pi += 1) {
@@ -1273,27 +2603,155 @@ window.__ModuleLoader__.load({
           h('span', {}, preview(group.replyText || group.replyNote || '', 150))
         )
       )
-      var entries = Array.isArray(group.entries) ? group.entries : []
-      var pins = []
-      var rest = []
-      for (var ei = 0; ei < entries.length; ei += 1) {
-        var entry = entries[ei]
-        if (entry && entry.isPin) pins.push(entry)
-        else rest.push(entry)
-      }
       // 重要消息不从轮里删掉，而是提到轮卡片之外常显：折叠这一轮也能一眼看到。
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
-        h('details', { style: C.turn, onToggle: opened[1] },
-          summary,
-          opened[0]
-            ? h('div', { style: C.turnBody }, rest.map(function (item, index) {
-                return h(EntryView, { key: 'e' + index, entry: item, wide: props.wide, config: props.config })
+      var pins = Array.isArray(group.pins) ? group.pins : []
+      var bodyNode = null
+      if (opened[0]) {
+        if (body.status === 'ready') {
+          bodyNode = body.entries.length === 0
+            ? h('div', { style: C.turnBody }, h('div', { style: C.sub }, '这一轮没有可展开的正文。'))
+            : h('div', { style: C.turnBody }, body.entries.map(function (item, index) {
+                return h(EntryView, { key: 'e' + index, entry: item, wide: props.wide, config: props.config, focus: focusHere ? jumpFocus : null })
               }))
-            : null
-        ),
+        } else if (body.status === 'error') {
+          bodyNode = h('div', { style: C.turnBody },
+            h('div', { style: { fontSize: '12px', color: '#f87171' } }, '这一轮的正文读取失败：' + body.error),
+            h('button', {
+              style: Object.assign({}, C.button, { marginTop: '6px' }),
+              onClick: function () { attemptState[1](function (value) { return value + 1 }) },
+            }, '重试')
+          )
+        } else {
+          bodyNode = h('div', { style: C.turnBody }, h('div', { style: C.sub }, '正在读取这一轮的正文…'))
+        }
+      }
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+        h('details', { ref: detailsRef, style: C.turn, onToggle: opened[1] }, summary, bodyNode),
         pins.map(function (pin, index) {
-          return h(EntryView, { key: 'pin' + index, entry: pin, wide: props.wide, config: props.config })
+          return h(EntryView, { key: 'pin' + index, entry: pin, wide: props.wide, config: props.config, focus: focusHere ? jumpFocus : null })
         })
+      )
+    }
+
+    // 宿主每重渲染一次都会重建这一页的元素树：props 没变就跳过，别让展开状态与子树白重算。
+    var MemoTurnCard = typeof react.memo === 'function' ? react.memo(TurnCard) : TurnCard
+
+    // 引用面板：点标签打开，列出去处，点一条就跳。只回答「去哪儿」，不复制原文——
+    // 原文已经在页面里，再贴一份只会让两处对不上。
+    var PANEL_BACKDROP = {
+      position: 'fixed', inset: '0', zIndex: 60,
+      display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+      paddingTop: '12vh', background: 'rgba(0,0,0,.38)',
+    }
+    var PANEL_BOX = {
+      width: 'min(560px, calc(100vw - 32px))',
+      display: 'flex', flexDirection: 'column', gap: '8px',
+      padding: '14px 16px', borderRadius: '12px',
+      background: 'Canvas', color: 'CanvasText',
+      border: '1px solid rgba(128,128,128,.4)',
+      boxShadow: '0 18px 40px rgba(0,0,0,.35)',
+    }
+    var PANEL_LIST = {
+      overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px',
+      maxHeight: '40vh', paddingRight: '4px', scrollbarWidth: 'thin',
+    }
+    var PANEL_ITEM = {
+      fontSize: '12px', textAlign: 'left', padding: '5px 8px', borderRadius: '6px',
+      border: '1px solid rgba(128,128,128,.28)', background: 'transparent', color: 'inherit', cursor: 'pointer',
+      display: 'flex', flexDirection: 'column', gap: '2px',
+    }
+    // 引用条目的两行：段号一行、正文一行。正文是段开头的一段话，读一眼就知道那条段是什么。
+    var PANEL_ITEM_HEAD = { fontSize: '12px', lineHeight: '17px', fontWeight: 600 }
+    var PANEL_ITEM_PREVIEW = { fontSize: '11px', lineHeight: '16px', opacity: 0.72, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }
+    var PANEL_NOTE_PREVIEW = { fontSize: '11px', lineHeight: '16px', opacity: 0.78, whiteSpace: 'pre-wrap', wordBreak: 'break-word', padding: '4px 8px', borderRadius: '6px', background: 'rgba(128,128,128,.10)' }
+
+    // 面板条目的落点键：只有「跳到某一段」的条目才有，用来按段去取预览。
+    function panelKeyOf(item) {
+      var target = item && item.target ? item.target : null
+      if (!target) return ''
+      if (typeof target.part !== 'number' || target.part <= 0) return ''
+      if (typeof target.o !== 'number' || target.o < 0) return ''
+      return target.o + ':' + (typeof target.i === 'number' ? target.i : -1) + ':' + target.part
+    }
+
+    function RefPanel(props) {
+      var info = props.info
+      var previewState = react.useState({})
+      var previews = previewState[0]
+      // 一打开就把每条「跳到某一段」的落点正文取回来：段号只是一串数字，看不到那一段写的是什么
+      // 就得先跳过去再判断是不是它。同一条折叠的多个段共用一次请求，取过的按版本缓存。
+      react.useEffect(function () {
+        if (!info) return
+        var items = Array.isArray(info.items) ? info.items : []
+        if (items.length === 0) return
+        var alive = true
+        var pending = {}
+        var keys = []
+        for (var i = 0; i < items.length; i += 1) {
+          var key = panelKeyOf(items[i])
+          if (!key || pending[key]) continue
+          pending[key] = items[i].target
+          keys.push(key)
+        }
+        if (keys.length === 0) return
+        var loading = {}
+        for (var k = 0; k < keys.length; k += 1) loading[keys[k]] = { text: '' }
+        previewState[1](function (previous) { return Object.assign({}, previous, loading) })
+        var ordinals = []
+        for (var key2 in pending) {
+          if (!Object.prototype.hasOwnProperty.call(pending, key2)) continue
+          if (ordinals.indexOf(pending[key2].o) < 0) ordinals.push(pending[key2].o)
+        }
+        var apply = function (ordinal) {
+          loadTurnEntries(props.sessionId, ordinal, props.stamp).then(function (slot) {
+            if (!alive) return
+            var patch = {}
+            for (var key in pending) {
+              if (!Object.prototype.hasOwnProperty.call(pending, key)) continue
+              if (pending[key].o !== ordinal) continue
+              patch[key] = {
+                done: true,
+                text: slot.status === 'ready' ? segmentPreviewOf(slot.entries, pending[key], props.config) : '',
+              }
+            }
+            previewState[1](function (previous) { return Object.assign({}, previous, patch) })
+          })
+        }
+        for (var oi = 0; oi < ordinals.length; oi += 1) apply(ordinals[oi])
+        return function () { alive = false }
+      }, [info])
+      if (!info) return null
+      var items = Array.isArray(info.items) ? info.items : []
+      return h('div', { style: PANEL_BACKDROP, onClick: props.onClose },
+        h('div', { style: PANEL_BOX, onClick: function (event) { event.stopPropagation() } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            h('div', { style: C.title }, info.title || '引用关系'),
+            h('div', { style: { flex: 1 } }),
+            h('button', { style: C.button, onClick: props.onClose }, '关闭')
+          ),
+          info.preview ? h('div', { style: PANEL_NOTE_PREVIEW }, info.preview) : null,
+          items.length > 0
+            ? h('div', { style: PANEL_LIST }, items.map(function (item, index) {
+                var key = panelKeyOf(item)
+                var got = key ? previews[key] : null
+                var text = got && got.text ? got.text : ''
+                return h('button', {
+                  key: 'r' + index,
+                  style: PANEL_ITEM,
+                  onClick: function () { props.onPick(item) },
+                },
+                  h('div', { style: PANEL_ITEM_HEAD }, item.label),
+                  text
+                    ? h('div', { style: PANEL_ITEM_PREVIEW }, text)
+                    : got
+                      ? h('div', { style: Object.assign({}, PANEL_ITEM_PREVIEW, { opacity: 0.4 }) },
+                          got.done ? '（没有取到这一段的正文）' : '正在读取这一段…')
+                      : null
+                )
+              }))
+            : h('div', { style: C.sub }, info.note || '没有可跳转的引用。'),
+          info.note ? h('div', { style: C.sub }, info.note) : null
+        )
       )
     }
 
@@ -1305,21 +2763,57 @@ window.__ModuleLoader__.load({
       var tick = react.useState(0)
       var wide = react.useState(false)
       var alive = react.useRef(true)
+      // 引用跳转：focus 是落点，panel 是「谁引用了谁」的列表。
+      var focusState = react.useState(null)
+      var panelState = react.useState(null)
+
+      react.useEffect(function () {
+        NAV.jump = function (target) {
+          if (!target) return
+          focusState[1]({
+            o: typeof target.o === 'number' ? target.o : -1,
+            i: typeof target.i === 'number' ? target.i : -1,
+            part: typeof target.part === 'number' ? target.part : 0,
+            // 落到「分段目录」上：检索没有具体段号时，它指向的正是那张目录。
+            dir: target.dir === true,
+            gen: (NAV.gen += 1),
+          })
+          panelState[1](null)
+        }
+        NAV.refs = function (info) {
+          // 面板每换一次内容就换一代：异步补内容的回调据此判断自己是否已经过期。
+          NAV.panelGen = (NAV.panelGen || 0) + 1
+          panelState[1](info)
+        }
+        return function () {
+          NAV.jump = null
+          NAV.refs = null
+        }
+      }, [])
+
+      // Esc 关面板；宿主环境没有键盘事件时跳过（冒烟测试里 window 是假件）。
+      react.useEffect(function () {
+        if (!panelState[0]) return
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+        var onKey = function (event) { if (event && event.key === 'Escape') panelState[1](null) }
+        window.addEventListener('keydown', onKey)
+        return function () { window.removeEventListener('keydown', onKey) }
+      }, [panelState[0]])
 
       react.useEffect(function () {
         alive.current = true
         var controller = typeof AbortController === 'function' ? new AbortController() : null
-        setPayload(function (previous) { return { status: previous.data ? 'ready' : 'loading', data: previous.data, error: '' } })
+        setPayload(function (previous) { return { status: previous.data ? 'ready' : 'loading', data: previous.data, error: '', at: previous.at || 0 } })
         fetch('/fold-view?session=' + encodeURIComponent(sessionId), controller ? { signal: controller.signal } : undefined)
           .then(readJson)
           .then(function (body) {
             if (!alive.current) return
-            setPayload({ status: 'ready', data: body, error: '' })
+            setPayload({ status: 'ready', data: body, error: '', at: Date.now() })
           })
           .catch(function (error) {
             if (!alive.current || (error && error.name === 'AbortError')) return
             setPayload(function (previous) {
-              return { status: previous.data ? 'ready' : 'error', data: previous.data, error: String(error && error.message ? error.message : error) }
+              return { status: previous.data ? 'ready' : 'error', data: previous.data, error: String(error && error.message ? error.message : error), at: previous.at || 0 }
             })
           })
         return function () {
@@ -1328,15 +2822,23 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId, tick[0]])
 
+      // 这一页不自动刷新：一次请求就是一整份投影，反复拉会白烧 CPU（每轮卡片都被重渲染）。
+      react.useEffect(function () {
+        if (!props.onMeta) return
+        if (payload.status === 'error') props.onMeta({ text: '读取失败', error: payload.error })
+        else if (payload.data) props.onMeta({ text: '读取于 ' + clock(payload.at || 0), error: '' })
+        else props.onMeta({ text: '正在读取…', error: '' })
+      }, [payload.status, payload.at, payload.error])
+
       var data = payload.data
       var toolbar = h('div', { style: C.row },
-        h('div', { style: C.sub }, '这是 session.deriveMessages() 派生的真实请求历史：折叠检查点就是模型实际看到的样子；点开一轮才渲染正文，避免长历史卡顿。'),
+        h('div', { style: C.sub }, '模型实际收到的历史；点开一轮才读取正文。'),
         h('div', { style: { flex: 1 } }),
         h('label', { style: Object.assign({}, C.sub, { cursor: 'pointer' }) },
           h('input', { type: 'checkbox', checked: wide[0], onChange: function (event) { wide[1](event.target.checked) } }),
           ' 展开长文本'
         ),
-        h('button', { style: C.button, onClick: function () { tick[1](function (value) { return value + 1 }) } }, '刷新')
+        h('button', { style: C.button, title: '这一页不自动刷新，重新拉一次投影', onClick: function () { tick[1](function (value) { return value + 1 }) } }, '重新读取')
       )
       if (!data) {
         return h('div', {}, toolbar,
@@ -1349,11 +2851,23 @@ window.__ModuleLoader__.load({
       var staleText = stale && stale.count > 0
         ? '；另有 ' + stale.count + ' 条旧版系统提示（' + formatChars(stale.chars) + '）留在会话历史里但不会上行，已从合计里扣掉'
         : ''
+      var recallTotals = data.recallTotals || {}
+      var recallBits = []
+      if (recallTotals.calls > 0) recallBits.push('召回调用 ' + recallTotals.calls + ' 次')
+      if (recallTotals.searches > 0) recallBits.push('检索 ' + recallTotals.searches + ' 次')
+      if (recallTotals.recalled > 0) {
+        recallBits.push((recallTotals.folds || 0) + ' 段折叠被召回 ' + recallTotals.recalled + ' 次' +
+          (recallTotals.parts > 0 ? '（分段一共取回 ' + recallTotals.parts + ' 段次）' : ''))
+      }
+      if (recallTotals.searched > 0) {
+        recallBits.push((recallTotals.searchedFolds || 0) + ' 张分段目录被检索 ' + recallTotals.searched + ' 段次（检索不返回原文）')
+      }
+      var recallText = recallBits.length > 0 ? '；模型视角里' + recallBits.join('、') : ''
       var notice = h('div', { style: C.notice },
         '折叠后的会话历史 ' + (totals.messages || 0) + ' 条消息、' + formatChars(totals.chars) + '，约 ' +
         formatTokens(tokens) + ' token（4 字符/token，按块 +4）；折叠检查点 ' + (totals.checkpoints || 0) +
         ' 条、重要消息 ' + (totals.pins || 0) + ' 条；相比不折叠省 ' + formatChars(totals.savedChars) +
-        '（' + percent(totals.saveRate) + '）' + staleText + '。'
+        '（' + percent(totals.saveRate) + '）' + staleText + recallText + '。'
       )
       var actual = data.actual || null
       var gap = actual ? tokens > actual.promptTokens * 1.3 : false
@@ -1380,7 +2894,24 @@ window.__ModuleLoader__.load({
         actualNote,
         warns.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, warns) : null,
         groups.map(function (group, index) {
-          return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0], config: data.config, current: index === lastSystemIndex })
+          return h(MemoTurnCard, {
+            key: 'g' + index,
+            group: group,
+            wide: wide[0],
+            config: data.config,
+            current: index === lastSystemIndex,
+            sessionId: sessionId,
+            stamp: typeof data.generatedAt === 'number' ? data.generatedAt : 0,
+            focus: focusState[0],
+          })
+        }),
+        h(RefPanel, {
+          info: panelState[0],
+          sessionId: sessionId,
+          config: data.config,
+          stamp: typeof data.generatedAt === 'number' ? data.generatedAt : 0,
+          onClose: function () { panelState[1](null) },
+          onPick: function (item) { NAV.jump(item.target) },
         })
       )
     }
@@ -1546,32 +3077,56 @@ window.__ModuleLoader__.load({
       var tabState = react.useState('ledger')
       var tab = tabState[0]
       var setTab = tabState[1]
+      // 顶栏那行小字由当前标签页回填：账本给「更新于 …」，模型视角给「读取于 …」。
+      var metaState = react.useState(null)
+      var reportMeta = react.useCallback ? react.useCallback(function (next) { metaState[1](next) }, []) : function (next) { metaState[1](next) }
+      // 关掉总开关时插件对模型完全静默，这一页就只剩账单：先说清楚，免得有人以为折叠坏了。
+      var offState = react.useState(null)
+      react.useEffect(function () {
+        var alive = true
+        fetch('/fold-config')
+          .then(readJson)
+          .then(function (body) {
+            if (!alive) return
+            var settings = body && body.config ? body.config : null
+            offState[1](Boolean(settings) && settings.enabled === false)
+          })
+          .catch(function () {
+            // 读不到配置就当「不知道」：这一条只是提示，不该因为配置接口出错就挡住账本。
+            if (alive) offState[1](null)
+          })
+        return function () { alive = false }
+      }, [])
       if (!sessionId) {
         return h('div', { style: C.panel }, h('div', { style: C.notice }, '切换到具体会话后，这里显示该会话的折叠情况。'))
       }
       var tabs = [['ledger', '账本'], ['model', '模型视角']]
-      var header = h('div', { style: C.row },
-        h('div', { style: C.title }, '上下文折叠'),
-        h('div', { style: C.sub }, '按轮折叠 · 折叠算收益，召回与重要消息算成本 · 参数在侧栏「插件」页的 dsh-fold-context 页面里调'),
-        h('div', { style: { flex: 1 } }),
-        h('a', {
-          style: Object.assign({}, C.button, { textDecoration: 'none', display: 'inline-block' }),
-          href: '/fold-report?session=' + encodeURIComponent(sessionId),
-          target: '_blank',
-          rel: 'noopener noreferrer',
-        }, '逐轮报告')
+      var meta = metaState[0]
+      // 换标签页就清掉上一页的「更新于」：两页读取节奏不同，混在一行会让人以为刚刷新过。
+      react.useEffect(function () { metaState[1](null) }, [tab])
+      var header = h('div', { style: C.header },
+        h('div', { style: C.headerTop },
+          h('div', { style: C.title }, '上下文折叠'),
+          h('div', { style: C.sub }, '折叠算收益，召回与重要消息算成本'),
+          h('div', { style: Object.assign({}, C.headerMeta, meta && meta.error ? C.headerMetaError : {}) },
+            meta && meta.error ? '读取失败：' + meta.error : (meta ? meta.text : '')
+          )
+        ),
+        h('div', { style: C.tabRow }, tabs.map(function (item) {
+          return h('button', {
+            key: item[0],
+            style: Object.assign({}, C.tab, tab === item[0] ? C.tabActive : {}),
+            onClick: function () { setTab(item[0]) },
+          }, item[1])
+        }), h('div', { style: C.tabHint }, '参数在侧栏「插件」页'))
       )
-      var tabBar = h('div', { style: C.tabBar }, tabs.map(function (item) {
-        return h('button', {
-          key: item[0],
-          style: Object.assign({}, C.tab, tab === item[0] ? C.tabActive : {}),
-          onClick: function () { setTab(item[0]) },
-        }, item[1])
-      }))
+      var offBanner = offState[0] === true
+        ? h('div', { style: C.notice }, '压缩已关闭：不折叠、不注入折叠说明、也不提供召回与固化工具。下方数字取自未压缩的会话，用来核对账单。')
+        : null
       var body = tab === 'model'
-        ? h(ModelView, { sessionId: sessionId })
-        : h(Ledger, { sessionId: sessionId })
-      return h('div', { style: C.panel }, header, tabBar, body)
+        ? h(ModelView, { sessionId: sessionId, onMeta: reportMeta })
+        : h(Ledger, { sessionId: sessionId, onMeta: reportMeta })
+      return h('div', { style: C.panel }, header, offBanner, body)
     }
 
     function apply(ctx) {
@@ -1599,19 +3154,50 @@ window.__ModuleLoader__.load({
     exports.inject = ['slots']
     // 供 node 冒烟测试直接调用组件函数：客户端没有测试框架，暴露内部组件比引入依赖便宜。
     exports.__test = {
+      FoldStatsView: FoldStatsView,
+      Ledger: Ledger,
+      ModelView: ModelView,
       CompositionPanel: CompositionPanel,
       CompositionChart: CompositionChart,
       TurnCard: TurnCard,
       entryKindOf: entryKindOf,
       costDriftNote: costDriftNote,
       calibrationNote: calibrationNote,
+      missNote: missNote,
       CostSection: CostSection,
       ledgerKpis: ledgerKpis,
       formatMoney: formatMoney,
       FoldOriginal: FoldOriginal,
+      EntryView: EntryView,
+      recallChipLabel: recallChipLabel,
+      partRefItems: partRefItems,
+      openPartRefs: openPartRefs,
+      openSearchRefs: openSearchRefs,
+      openCallRefs: openCallRefs,
+      searchRefItems: searchRefItems,
+      turnSearchedItems: turnSearchedItems,
+      partSearchCount: partSearchCount,
+      turnCallItems: turnCallItems,
+      turnRecalledItems: turnRecalledItems,
+      callsOfEntry: callsOfEntry,
+      NAV: NAV,
+      recallCallTitle: recallCallTitle,
+      recallEntryTags: recallEntryTags,
       foldPartsOf: foldPartsOf,
+      callsOfBlock: callsOfBlock,
+      segmentPreview: segmentPreview,
+      segmentPreviewOf: segmentPreviewOf,
+      panelKeyOf: panelKeyOf,
+      RefPanel: RefPanel,
       recallPlan: recallPlan,
       recallIndexLines: recallIndexLines,
+      partRecallCount: partRecallCount,
+      FoldItem: FoldItem,
+      parseRecallResult: parseRecallResult,
+      recallCutText: recallCutText,
+      RecallSegment: RecallSegment,
+      BlockView: BlockView,
+      RecallResult: RecallResult,
     }
     return module.exports
   },

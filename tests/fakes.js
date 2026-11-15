@@ -89,7 +89,11 @@ export function makeCtx() {
     systemPrompt: {
       section(definition) {
         sections.push(definition)
-        return () => {}
+        // 真宿主卸载 section 后会从模型上下文里消失；假宿主也要能摘掉，否则「关掉总开关」测不出来。
+        return () => {
+          const index = sections.indexOf(definition)
+          if (index >= 0) sections.splice(index, 1)
+        }
       },
     },
     effect(fn) {
@@ -104,15 +108,30 @@ export function makeCtx() {
   }
 }
 
-export function userNode(seq, text, kind = 'user') {
+export function userNode(seq, text, kind = 'user', form) {
   return {
     type: 'user/message',
     seq,
     data: {
       id: 'm' + seq,
       role: 'user',
-      source: { kind },
+      source: form === undefined ? { kind } : { kind, form },
       content: [{ type: 'text', text }],
+    },
+  }
+}
+
+export function developerNode(seq, text, kind = 'tool-registry') {
+  return {
+    type: 'developer/message',
+    seq,
+    data: {
+      message: {
+        id: 'm' + seq,
+        role: 'developer',
+        source: { kind },
+        content: [{ type: 'text', text }],
+      },
     },
   }
 }

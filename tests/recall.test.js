@@ -40,7 +40,16 @@ test('foldParts 按行首前缀拆段，段号连续且 chars 不算前缀', () 
 })
 
 test('buildFoldIndex 给出目录、段号、类型与预览', () => {
-  const index = buildFoldIndex(record(), { previewChars: 20 })
+  // 预览也要按比例来：第一段够长（约 160 字），才放得下 20 字预览。
+  const longRecord = record({
+    items: [
+      { seq: 11, text: '[思考] 先看目录' + '再看配置'.repeat(40) },
+      { seq: 12, text: '[回复] 开始搬' },
+      { seq: 13, text: '[调用 run_code] {"code":"1"}' },
+      { seq: 14, text: '[工具结果] 完成' },
+    ],
+  })
+  const index = buildFoldIndex(longRecord, { previewChars: 20 })
   assert.match(index, /折叠 f1（第 2 轮/)
   assert.match(index, /共 4 段/)
   assert.match(index, /#1 \[思考\]/)
@@ -61,6 +70,26 @@ test('buildFoldIndex 超预算时按行截断并说明剩余段号', () => {
   assert.ok(index.length <= 400)
   assert.match(index, /目录已截断/)
   assert.match(index, /还有 \d+ 段没列出来/)
+})
+
+test('目录每行在摘要与原文间只比长短，不压缩预览长度', () => {
+  // 9 字的段截成预览也省不到一半：直接给原文。
+  const tiny = buildFoldIndex(record(), { previewChars: 100 })
+  const tinyLine = tiny.split('\n').find((line) => line.startsWith('#1 '))
+  assert.ok(tinyLine.includes('先看目录'), tinyLine)
+  assert.equal(tinyLine.includes('…'), false)
+
+  // 400 字的段：预览由 recallIndexPreviewTokens 截断，够短才用预览。
+  const big = { kind: 'fold', id: 'f9', turn: 1, items: [{ seq: 1, text: '[思考] ' + 'x'.repeat(400) }] }
+  const previewLine = buildFoldIndex(big, { previewChars: 100 }).split('\n').find((line) => line.startsWith('#1 '))
+  assert.ok(previewLine.endsWith('…'), previewLine)
+  // 预览长度由 previewChars 决定，不被比例再截成原文的一半。
+  assert.ok(previewLine.length < 200, '预览不该被比例截短：' + previewLine.length)
+
+  // 预览上限比原文还大时预览并不更省：该行直接给原文。
+  const fullLine = buildFoldIndex(big, { previewChars: 1000 }).split('\n').find((line) => line.startsWith('#1 '))
+  assert.equal(fullLine.includes('…'), false)
+  assert.ok(fullLine.includes('x'.repeat(400)), '原文整段给出')
 })
 
 test('normalizePartSelectors 接受数组与逗号/空白分隔字符串', () => {
@@ -158,4 +187,59 @@ test('回复完整写入检查点时，召回不再返回回复段', () => {
   assert.deepEqual(foldParts(record({ replyTruncated: true })).map((part) => part.kind), ['think', 'reply', 'call', 'result'])
   assert.ok(describeFold(record({ replyTruncated: true })).includes('[回复] 开始搬'))
   assert.deepEqual(foldParts(record()).map((part) => part.kind), ['think', 'reply', 'call', 'result'])
+})
+
+test('整段召回按块剔除回复：多行回复不会留下孤儿行', () => {
+  const rec = {
+    kind: 'fold',
+    id: 'f3',
+    turn: 5,
+    chars: 200,
+    replyTruncated: false,
+    items: [
+      { seq: 1, text: '[思考] 想了一下\n[回复] 第一行\n第二行\n第三行\n[调用 edit] {"a":1}' },
+      { seq: 2, text: '[回复] 只有回复的一段' },
+      { seq: 3, text: '[工具结果] 完成' },
+    ],
+  }
+  const text = describeFold(rec)
+  // 早先按行过滤只删掉带前缀的首行，回复正文的其它行会以孤儿行留在原处，
+  // 既跟检查点里的回复重复，又读不出它原本属于哪一段。
+  assert.equal(text.includes('[回复]'), false)
+  assert.equal(text.includes('第二行'), false, text)
+  assert.equal(text.includes('第三行'), false, text)
+  assert.equal(text.includes('[思考] 想了一下'), true)
+  assert.equal(text.includes('[调用 edit]'), true)
+  assert.equal(text.includes('[工具结果] 完成'), true)
+  // 只有回复的节点整条不出现，也不会单独留一个空标题。
+  assert.equal(text.includes('--- #2 ---'), false)
+})
+
+test('长 markdown 回复超过召回额度时按标题切段，短回复仍整段', () => {
+  const md = '## 结论\n' + 'a'.repeat(120) + '\n## 改动\n' + 'b'.repeat(120) + '\n## 验证\n' + 'c'.repeat(120)
+  const rec = { kind: 'fold', id: 'f8', turn: 3, items: [{ seq: 1, text: '[回复] ' + md }] }
+  // 阈值就是单次召回额度：不传时保持原有的整段召回。
+  assert.equal(foldParts(rec).length, 1)
+  const split = foldParts(rec, { replySplitChars: 100 })
+  assert.deepEqual(split.map((part) => part.no), [1, 2, 3])
+  assert.deepEqual(split.map((part) => part.kind), ['reply', 'reply', 'reply'])
+  assert.ok(split[0].text.startsWith('[回复] ## 结论'), split[0].text)
+  assert.equal(split[0].chars, ('## 结论\n' + 'a'.repeat(120)).length)
+
+  const index = buildFoldIndex(rec, { parts: split, previewChars: 12 })
+  assert.match(index, /共 3 段/)
+  assert.match(index, /#1 \[回复\]/)
+  assert.match(index, /## 结论/)
+  assert.match(index, /#3 \[回复\]/)
+})
+
+test('标题前的导语单独成段；未截断的回复不参与切段', () => {
+  const md = '前言\n\n## 甲\n' + 'a'.repeat(120) + '\n## 乙\n' + 'b'.repeat(120)
+  const rec = { kind: 'fold', id: 'f9', turn: 4, items: [{ seq: 1, text: '[回复] ' + md }] }
+  const parts = foldParts(rec, { replySplitChars: 100 })
+  assert.equal(parts.length, 3)
+  assert.equal(parts[0].chars, '前言'.length)
+  assert.ok(parts[0].text.startsWith('[回复] 前言'))
+  // 检查点里已完整保留回复时不返回回复段，也就没有切段。
+  assert.deepEqual(foldParts({ ...rec, replyTruncated: false }, { replySplitChars: 100 }), [])
 })
