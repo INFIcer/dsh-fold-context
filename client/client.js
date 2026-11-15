@@ -303,6 +303,43 @@ window.__ModuleLoader__.load({
       return 'reply'
     }
 
+    // 重要消息的条数与字数都取自「模型此刻看得见的那几条」：载荷记录只补轮次与发布时间，
+    // 两边会漂移（被压缩卷走、账本没记上、同标题重发过），这条说明负责把差在哪讲清楚。
+    function pinSourceNote(totals) {
+      var text = '重要消息按模型此刻看得见的几条计价（载荷记录只补轮次与发布时间）。'
+      if (totals.pinsLost > 0) {
+        text += '被压缩卷走的 ' + totals.pinsLost + ' 条只报体积（' +
+          formatCharsTokens(totals.pinLostChars || 0) + '），不进成本。'
+      }
+      if (totals.pinsDuplicate > 0) {
+        text += '另有 ' + totals.pinsDuplicate + ' 条是同一标题的重复记录（' +
+          formatCharsTokens(totals.pinDuplicateChars || 0) + '），不是丢了一条，不计入。'
+      }
+      if (totals.pinsSuperseded > 0) {
+        text += '另有 ' + totals.pinsSuperseded + ' 条是同一标题的旧版本（重发订正后留下的记录，' +
+          formatCharsTokens(totals.pinSupersededChars || 0) + '），已被新版本取代，不是被压缩卷走。'
+      }
+      if (totals.pinsUnrecorded > 0) {
+        text += '上下文里另有 ' + totals.pinsUnrecorded + ' 条没有载荷记录，仍按字数计价。'
+      }
+      return text
+    }
+
+    function pinHintOf(totals) {
+      // 这里必须用 pinTokens，不能用字数除以 CHARS_PER_TOKEN：成本卡上的总数是逐条相加出来的，
+      // 同一张卡上两个数差几十 token 会让人以为其中一个算错了。
+      var pinChars = totals.pinChars || 0
+      var pinTokens = typeof totals.pinTokens === 'number' && isFinite(totals.pinTokens)
+        ? totals.pinTokens
+        : Math.round(pinChars / CHARS_PER_TOKEN)
+      var hint = totals.pins + ' 条在上下文里，' + formatChars(pinChars) + '（≈' + formatTokens(pinTokens) + ' token）'
+      if (totals.pinsLost > 0) hint += '；另有 ' + totals.pinsLost + ' 条已被压缩卷走，不计入'
+      if (totals.pinsDuplicate > 0) hint += '；另有 ' + totals.pinsDuplicate + ' 条重复记录，不计入'
+      if (totals.pinsSuperseded > 0) hint += '；另有 ' + totals.pinsSuperseded + ' 条旧版本记录（已重发），不计入'
+      if (totals.pinsUnrecorded > 0) hint += '；其中 ' + totals.pinsUnrecorded + ' 条账本没有记录，按上下文计价'
+      return hint
+    }
+
     // 账本顶部四张卡只报 token。折叠的收益没法折成人民币：同一批 token 换成高峰价就翻倍，
     // 真实请求还会被缓存、请求期压缩器和工具定义改写，算出来的金额既不能验证也不能横向比。
     // 所以收益与成本一律用 token 计量；金额只留在「成本参考」里，回答「这些 token 折算多少」。
@@ -327,8 +364,7 @@ window.__ModuleLoader__.load({
           label: '重要消息成本',
           value: (pin > 0 ? '−' : '') + formatTokens(pin) + ' token',
           color: pin > 0 ? '#fbbf24' : 'inherit',
-          hint: totals.pins + ' 条固化，' + formatCharsTokens(totals.pinChars || 0) +
-            (totals.pinsLost > 0 ? '；' + totals.pinsLost + ' 条已被压缩卷走（不再计入常驻）' : ''),
+          hint: pinHintOf(totals),
         },
         {
           label: '净收益',
@@ -513,6 +549,9 @@ window.__ModuleLoader__.load({
     function CostSection(props) {
       var cost = props.cost || {}
       var totals = cost.totals || {}
+      // 重要消息的条数与字数在账本（/fold-stats）里，成本模型（/fold-composition）没有这一份；
+      // 口径说明里要用前者，所以由上层传进来，不拿 cost.totals 顶替。
+      var pinTotals = props.pinTotals || {}
       var latest = cost.latest || null
       var prices = cost.prices || { cacheHit: 0.02, input: 1, output: 4 }
       var rows = Array.isArray(cost.turns) ? cost.turns : []
@@ -640,6 +679,7 @@ window.__ModuleLoader__.load({
           h('div', { style: C.noteLine }, calibrationNote(cost)),
           h('div', { style: C.noteLine }, costDriftNote(cost.drift)),
           h('div', { style: C.noteLine }, missNote(totals)),
+          h('div', { style: C.noteLine }, pinSourceNote(pinTotals)),
           h('div', { style: C.noteLine }, estimateVsActualNote(cost))
         ),
         h('div', { style: Object.assign({}, C.sub, { margin: '10px 0 4px' }) }, '按类别拆分（估算）'),
@@ -754,7 +794,7 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { fontSize: '11px', color: '#f87171' } }, '上下文构成读取失败：' + compositionState[0].error + '（' + Math.round(COMPOSITION_REFRESH_MS / 1000) + ' 秒后自动重试）')
           : null
 
-      var costSection = cost ? h(CostSection, { cost: cost }) : null
+      var costSection = cost ? h(CostSection, { cost: cost, pinTotals: totals }) : null
 
       var turns = Array.isArray(data.turns) ? data.turns : []
       var max = 1
