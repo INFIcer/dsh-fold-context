@@ -80,10 +80,14 @@ export function makeCtx() {
       }
     },
     tools: {
-      register(definition) {
-        registrations.push(definition)
+      // 第二个参数是真宿主的「按步激活条件」：测试要用它验证工具在某些会话里不可见。
+      register(definition, options) {
+        const entry = options && typeof options.when === 'function'
+          ? { ...definition, when: options.when }
+          : definition
+        registrations.push(entry)
         return () => {
-          const index = registrations.indexOf(definition)
+          const index = registrations.indexOf(entry)
           if (index >= 0) registrations.splice(index, 1)
         }
       },

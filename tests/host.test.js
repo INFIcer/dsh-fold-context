@@ -31,6 +31,15 @@ function toolNamed(ctx, name) {
   return ctx.registrations.find((definition) => definition.name === name)
 }
 
+// 提示段文案按会话现算：没传会话时取允许折叠的那一份。
+function sectionTextOf(ctx, session) {
+  const section = ctx.sections.find((entry) => entry.name === 'fold-compression')
+  if (!section) return ''
+  return typeof section.text === 'function'
+    ? section.text({ agent: { session } })
+    : String(section.text || '')
+}
+
 test('turn/end 后把本轮折叠成一条检查点消息，并注入提示段与三个工具', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
   const ctx = makeCtx()
@@ -75,7 +84,7 @@ test('turn/end 后把本轮折叠成一条检查点消息，并注入提示段�
   assert.equal(onDisk.maxNoteTokens, 400)
   assert.equal(api.getConfig().maxNoteTokens, 400)
   // 提示段随配置重建：新上限要出现在新版文案里。
-  assert.ok(ctx.sections.some((section) => section.text && section.text.includes('maxNoteTokens')))
+  assert.ok(sectionTextOf(ctx, session).includes('maxNoteTokens'))
 
   const recalled = await toolNamed(ctx, 'fold_recall').execute({ id: 'f1' }, { agent: { session } })
   assert.equal(recalled.ok, true)
@@ -416,7 +425,7 @@ test('官方压缩吞掉重要消息时不补发：淡化交给压缩层', async
   api.stop()
 })
 
-test('子代理里 fold_pin 被拒绝，不写待投递记录也不写账本', async () => {
+test('子代理里 fold_pin 可用，但只写进子会话自己的会话与账本', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
   const ctx = makeCtx()
   const api = assemble(ctx, { homeDir, logFile: null })
@@ -426,14 +435,102 @@ test('子代理里 fold_pin 被拒绝，不写待投递记录也不写账本', a
   // 父会话先被观察到：子代理解析父会话时走运行时缓存。
   emit(ctx, parent, { type: 'turn/start', seq: 1, data: { turn: 1 } })
 
-  const pin = await toolNamed(ctx, 'fold_pin').execute({ label: '结论', text: '不该写进去' }, { agent: { session: child } })
-  assert.equal(pin.ok, false)
-  assert.ok(pin.text.includes('最终回答'), pin.text)
-  assert.equal(sessionPinEvents(child), 0)
+  emit(ctx, child, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+  const pin = await toolNamed(ctx, 'fold_pin').execute({ label: '自己的备忘', text: '只在子会话可见' }, { agent: { session: child } })
+  assert.equal(pin.ok, true, pin.text)
+  assert.ok(pin.text.includes('父代理看不到'), pin.text)
+  emit(ctx, child, { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'stop' } } })
+  await tick()
 
-  const store = new FoldStore({ homeDir, sessionId: 'sess-sub-pin' })
-  assert.equal(store.pendingPins().length, 0, '拒绝后不该留下待投递记录')
-  assert.equal(store.pins().length, 0, '拒绝后不该写账本')
+  assert.equal(sessionPinEvents(child), 1, 'pin 照常注入子代理自己的会话')
+  assert.equal(sessionPinEvents(parent), 0, '父会话不该收到子代理的 pin')
+  assert.equal(checkpointOf(child), undefined, '子代理默认不折叠')
+  assert.equal(new FoldStore({ homeDir, sessionId: 'sess-sub-pin' }).pins().length, 1, '记录写进子会话自己的账本')
+  assert.equal(new FoldStore({ homeDir, sessionId: 'sess-parent-pin' }).pins().length, 0, '父会话账本不该多一条')
+  api.stop()
+})
+
+test('默认只在主会话折叠：子代理会话的轮次保持原文', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const child = new FakeSession('sess-sub-nofold', { origin: 'subagent', parentSession: 'sess-parent-nofold' })
+  child.seed([userNode(1, '开始', 'user')])
+  emit(ctx, child, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+  emit(ctx, child, { type: 'step/start', seq: 3, data: { turn: 1, step: 1 } })
+  emitSurface(ctx, child, assistantNode(4, { reasoning: '想'.repeat(3000) }))
+  emit(ctx, child, { type: 'step/end', seq: 5, data: { turn: 1, step: 1 } })
+  emit(ctx, child, { type: 'turn/end', seq: 6, data: { turn: 1, reason: { kind: 'stop' } } })
+  await tick()
+
+  assert.equal(checkpointOf(child), undefined)
+  assert.deepEqual(child.nodes, [1, 4], '原文留在 surface 上')
+  let payload = ''
+  try {
+    payload = readFileSync(join(homeDir, 'fold-store', 'sess-sub-nofold.jsonl'), 'utf8')
+  } catch {
+    payload = ''
+  }
+  assert.equal(payload.includes('"kind":"fold"'), false, '不该写折叠记录')
+  api.stop()
+})
+
+test('foldSubagents 打开后子代理会话也折叠', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ foldSubagents: true }), 'utf8')
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const child = new FakeSession('sess-sub-fold', { origin: 'subagent', parentSession: 'sess-parent-fold' })
+  child.seed([userNode(1, '开始', 'user')])
+  emit(ctx, child, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+  emit(ctx, child, { type: 'step/start', seq: 3, data: { turn: 1, step: 1 } })
+  emitSurface(ctx, child, assistantNode(4, { reasoning: '想'.repeat(3000) }))
+  emit(ctx, child, { type: 'step/end', seq: 5, data: { turn: 1, step: 1 } })
+  emit(ctx, child, { type: 'turn/end', seq: 6, data: { turn: 1, reason: { kind: 'stop' } } })
+  await tick()
+
+  assert.equal(api.getConfig().foldSubagents, true)
+  assert.ok(checkpointOf(child), '打开后子代理也应当折叠')
+  api.stop()
+})
+
+test('提示段按会话给：主会话说明折叠，子代理说明 pin 边界，fork 补一句父会话检查点', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const main = new FakeSession('sess-main-prompt')
+  const spawn = new FakeSession('sess-spawn-prompt', { origin: 'subagent', parentSession: 'sess-main-prompt' })
+  const fork = new FakeSession('sess-fork-prompt', { origin: 'subagent', parentSession: 'sess-main-prompt', isSeeded: true })
+
+  const master = sectionTextOf(ctx, main)
+  assert.ok(master.includes('这个会话启用了按轮折叠'), master)
+
+  const spawned = sectionTextOf(ctx, spawn)
+  assert.ok(spawned.includes('没有启用按轮折叠'), spawned)
+  assert.ok(spawned.includes('只有你自己看得见'), spawned)
+  assert.equal(spawned.includes('来自父会话'), false, '普通子代理没有父会话的检查点')
+
+  const inherited = sectionTextOf(ctx, fork)
+  assert.ok(inherited.includes('来自父会话'), inherited)
+  assert.ok(inherited.includes('fold_recall'), inherited)
+  api.stop()
+})
+
+test('工具跟着折叠范围走：主会话三个都可见，普通子代理只剩 fold_pin，fork 子会话还能召回', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const main = new FakeSession('sess-main-tools')
+  const spawn = new FakeSession('sess-spawn-tools', { origin: 'subagent', parentSession: 'sess-main-tools' })
+  const fork = new FakeSession('sess-fork-tools', { origin: 'subagent', parentSession: 'sess-main-tools', isSeeded: true })
+  const visible = (session) => ctx.registrations
+    .filter((tool) => typeof tool.when !== 'function' || tool.when({ agent: { session } }))
+    .map((tool) => tool.name)
+    .sort()
+
+  assert.deepEqual(visible(main), ['fold_config', 'fold_pin', 'fold_recall'])
+  assert.deepEqual(visible(spawn), ['fold_pin'])
+  assert.deepEqual(visible(fork), ['fold_pin', 'fold_recall'])
   api.stop()
 })
 
