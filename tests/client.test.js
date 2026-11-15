@@ -899,3 +899,45 @@ test('引用面板给落点段带正文预览', () => {
   assert.equal(t.panelKeyOf({ target: { o: 6, i: 24 } }), '')
 })
 
+test('折叠原文的分段目录收成一行，段列表仍是逐段折叠条目', () => {
+  const { module } = loadClient({ open: true })
+  const t = module.__test
+  const record = {
+    id: 'f9',
+    turn: 9,
+    replyTruncated: true,
+    items: Array.from({ length: 10 }, function (_, i) {
+      return { seq: 100 + i, blocks: [{ kind: 'think', text: '思'.repeat(400) }] }
+    }),
+  }
+  const node = t.FoldOriginal({ record: record, config: { maxRecallTokens: 1000, recallIndexPreviewTokens: 25, minFoldRatio: 0.5 } })
+  const body = node.children[1]
+  assert.ok(body, '展开后应拿到原文面板正文')
+  // 假 createElement 不会像 React 那样摊平数组子节点，这里自己摊平一层。
+  const flat = function (nodes) {
+    const out = []
+    const walk = function (list) {
+      for (const child of list) {
+        if (Array.isArray(child)) walk(child)
+        else out.push(child)
+      }
+    }
+    walk(nodes)
+    return out
+  }
+  const bodyItems = flat(body.children)
+  const dir = bodyItems.find(function (child) { return child && child.type === 'details' })
+  assert.ok(dir, '目录应是独立的折叠条目')
+  // 收起行除了行数，还要给目录自身的字数与 token：目录是第一遍真正发给模型的东西，
+  // 只写「10 行」看不出这一面墙多大；原文合计在标题行，两者别混。
+  const dirHead = JSON.stringify(dir.children[0])
+  assert.ok(dirHead.includes('分段目录 · 10 行 · '), dirHead)
+  assert.ok(/[\d.]+k? 字（≈[\d.]+k? token） · 召回时按这里的段号选/.test(dirHead), dirHead)
+  // 目录行只在点开时才挂进树；默认收起的状态由 useLazyOpen 保证（open:false 时不渲染正文）。
+  assert.equal(typeof dir.props.onToggle, 'function')
+  const segments = bodyItems.filter(function (child) { return child && child.type === t.FoldItem })
+  assert.equal(segments.length, 10, '每段仍是自己的折叠条目')
+  // 目录行不再直接铺在原文面板第一层：第一层只有目录与段条目。
+  assert.equal(bodyItems.length, 11)
+})
+

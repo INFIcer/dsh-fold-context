@@ -1610,13 +1610,65 @@ window.__ModuleLoader__.load({
       var searchedCount = typeof props.searchedCount === 'number' && props.searchedCount > 0 ? props.searchedCount : 0
       var head = '折叠掉的原文 · ' + plan.parts.length + ' 段 · 约 ' + formatChars(plan.chars) + '（≈' + formatTokens(plan.tokens) + ' token）' +
         '（' + (plan.direct ? '召回时整段返回' : '召回时先给目录') + '，模型看不到）'
-      // 不再单列说明段：目录行本身就带段号/类型/字数/token/预览，整段模式靠每段头部标注。
+      // 目录被检索：这条折叠的分段目录被后来的关键词检索按段号用过几次。
+      var dirCount = searchedCount > 0 ? searchedCount : (searchedRefs.length > 0 ? searchedRefs.length : 0)
+      // 目录的展开状态自己管：跳转要能把它打开并滚过去，用户点开也要能收回去。
+      var directory = react.useState(false)
+      react.useEffect(function () {
+        if (!focusDir) return
+        if (!directory[0]) {
+          directory[1](true)
+          return
+        }
+        var node = dirRef.current
+        if (!node || typeof node.scrollIntoView !== 'function') return
+        var scroll = setTimeout(function () { node.scrollIntoView({ block: 'center', behavior: 'smooth' }) }, 80)
+        return function () { clearTimeout(scroll) }
+        // opened[0] 一起看：外层是先展开、目录节点才挂进 DOM 的。
+      }, [focusDir, focusGen, directory[0], opened[0]])
       var children = []
       if (!plan.direct) {
-        var lines = recallIndexLines(plan.parts, plan.previewChars)
+        var lines = recallIndexLines(plan.parts, plan.previewChars, recalledParts, searchedParts)
+        var lineNodes = []
+        // 目录自己也占上下文：模型第一遍收到的就是这些行。收起时只写「N 行」，看不出这一面墙多大，
+        // 所以把目录自身的字数与 token 一起写着——和原文合计是两个数，别混。
+        var dirChars = 0
         for (var li = 0; li < lines.length; li += 1) {
-          children.push(h('div', { key: 'idx' + li, style: RECALL_LINE_STYLE }, lines[li]))
+          dirChars += lines[li].length + 1
+          lineNodes.push(h('div', { key: 'idx' + li, style: RECALL_LINE_STYLE }, recallCountNodes(lines[li])))
         }
+        // 目录是「一面墙」：收起时只留一行，下面每段本来就是可折叠条目。
+        // 要按段号扫类型/字数时再点开，和召回时先给目录、再按段取回是同一个顺序。
+        children.push(h('details', {
+          key: 'idx',
+          ref: dirRef,
+          style: C.nested,
+          open: directory[0],
+          onToggle: function (event) { directory[1](event.currentTarget.open === true) },
+        },
+          h('summary', { style: Object.assign({}, C.nestedSummary, { opacity: 1 }) },
+            h('span', { style: { opacity: 0.7 } },
+              '分段目录 · ' + lines.length + ' 行 · ' + formatCharsTokens(dirChars) + ' · 召回时按这里的段号选'),
+            // 这张目录被关键词检索用过：段号就是检索命中的段号，点开看是哪几次检索。
+            dirCount > 0
+              ? h('span', {
+                  style: Object.assign({}, SEARCH_TEXT_STYLE, CHIP_CLICK),
+                  title: '这张分段目录被 ' + dirCount + ' 次关键词检索用过' +
+                    (searchedSegments > 0 ? '，其中 ' + searchedSegments + ' 段被命中 ' + searchedTimes + ' 次' : '') +
+                    '；点开看是哪几次检索',
+                  onClick: function (event) {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    openSearchRefs(searchedParts, searchedRefs, 0)
+                  },
+                }, ' · 被检索 ' + dirCount + ' 次')
+              : null
+          ),
+          // 目录本身也是一面墙：行数多时限高，别让「展开目录」也把页面拉长。
+          directory[0]
+            ? h('div', { style: lines.length > LINE_SCROLL_AFTER ? C.scrollBoxTight : C.nestedBody }, lineNodes)
+            : null
+        ))
       }
       var partNodes = []
       for (var pi = 0; pi < plan.parts.length; pi += 1) {
