@@ -19,6 +19,8 @@ import {
   validateConfigPatch,
 } from '../lib/config.js'
 import { promptSection, systemPromptText } from '../lib/prompt.js'
+import { createPinMessage, pinBodyOf, pinCharsOf, resolvePins } from '../lib/pins.js'
+import { pinPrefix, recentPinPrefix, recentPinSuffix } from '../lib/constants.js'
 import { moneyOf, pricesOf, roundMoney, yuanOf } from '../lib/pricing.js'
 import {
   foldParts,
@@ -457,6 +459,136 @@ test('publishPin 交给宿主投递时，账本等消息真的写进会话后才
   assert.equal(store.pins().length, 1)
 })
 
+test('fold_pin 的消息头按 level 生成：省略仍是旧头，recent 带发布轮次', () => {
+  const permanent = createPinMessage({ label: '部署路径', text: 'E:\\dsh' })
+  assert.equal(permanent.content[0].text, pinPrefix + ' 部署路径\nE:\\dsh')
+  assert.equal(permanent.source.kind, 'fold-pin')
+  assert.equal(permanent.role, 'user')
+
+  const recent = createPinMessage({ label: '部署路径', text: 'E:\\dsh', level: 'recent', turn: 12 })
+  assert.equal(recent.content[0].text, recentPinPrefix + '12' + recentPinSuffix + ' 部署路径\nE:\\dsh')
+  assert.ok(recent.content[0].text.startsWith('【近期重要·第12轮·可能过时】 '))
+  // 省略 level 与显式 permanent 产生同一种头。
+  assert.equal(createPinMessage({ label: 'X', text: 'y', level: 'permanent' }).content[0].text, pinPrefix + ' X\ny')
+})
+
+test('pinBodyOf 认两种头：旧消息、recent 与无头正文都能解析', () => {
+  assert.equal(pinBodyOf(pinPrefix + ' X\nhello\nworld'), 'hello\nworld')
+  assert.equal(pinBodyOf('【近期重要·第12轮·可能过时】 X\nhello'), 'hello')
+  assert.equal(pinBodyOf(pinPrefix + ' X'), '')
+  assert.equal(pinBodyOf('【近期重要·第3轮·可能过时】 X'), '')
+  assert.equal(pinBodyOf('没有前缀的正文'), '没有前缀的正文')
+  // 正文里引用头字样不是头：只有整行完全匹配才剥。
+  assert.equal(pinBodyOf('说明\n' + pinPrefix + ' X\n正文'), '说明\n' + pinPrefix + ' X\n正文')
+  assert.equal(pinBodyOf(''), '')
+})
+
+test('pinCharsOf 按实际头长算：recent 的轮次位数不同，长度跟着变', () => {
+  const body = 'abc'
+  assert.equal(pinCharsOf('X', body), (pinPrefix + ' X\n' + body).length)
+  assert.equal(pinCharsOf('X', body, 'recent', 9), ('【近期重要·第9轮·可能过时】 X\n' + body).length)
+  assert.equal(pinCharsOf('X', body, 'recent', 100), ('【近期重要·第100轮·可能过时】 X\n' + body).length)
+  // 轮次多一位，整条消息就多一个字：头长不是固定公式。
+  assert.equal(pinCharsOf('X', body, 'recent', 100), pinCharsOf('X', body, 'recent', 9) + 2)
+})
+
+test('publishPin 记录 level：只有 recent 才写，回执说明可能过时', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const session = new FakeSession('sess-pin-level')
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+  const config = normalizeConfig({})
+
+  const recent = publishPin({ session, label: '临时结论', text: '先用 A 方案', level: 'recent', turn: 7, config, store, log: silent })
+  assert.equal(recent.ok, true)
+  assert.ok(recent.note.includes('近期重要'), recent.note)
+  assert.ok(recent.note.includes('可能过时'), recent.note)
+  const recentMessage = session.events.at(-1).data.content[0].text
+  assert.ok(recentMessage.startsWith('【近期重要·第7轮·可能过时】 临时结论\n'), recentMessage)
+  const recentRecord = store.pins().find((record) => record.id === '临时结论')
+  assert.equal(recentRecord.level, 'recent')
+  assert.equal(recentRecord.turn, 7)
+
+  const permanent = publishPin({ session, label: '长期结论', text: '改用 B 方案', config, store, log: silent })
+  assert.equal(permanent.ok, true)
+  assert.equal(permanent.note, undefined, '永久记录不带「可能过时」回执')
+  const permanentRecord = store.pins().find((record) => record.id === '长期结论')
+  assert.equal(permanentRecord.level, undefined, '永久是默认，记录里不写 level')
+})
+
+test('轮内发布 recent 时待投递记录与队列都带 level 与轮次', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const session = new FakeSession('sess-pin-pending-level')
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+  const queued = []
+  const result = publishPin({
+    session,
+    label: '临时约定',
+    text: '这一版接口先用 snake_case',
+    level: 'recent',
+    turn: 4,
+    config: normalizeConfig({}),
+    store,
+    log: silent,
+    onPublish: (pin) => queued.push(pin),
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.pending, true)
+  const pending = store.pendingPins()
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].level, 'recent')
+  assert.equal(pending[0].turn, 4)
+  // 队列里的消息要带同样两项，补投时 createPinMessage 才能还原同一条消息。
+  assert.equal(queued[0].level, 'recent')
+  assert.equal(queued[0].turn, 4)
+})
+
+test('非法 level 不发布，回执说明只支持两个值且省略即 permanent', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const session = new FakeSession('sess-pin-bad-level')
+  const store = new FoldStore({ homeDir, sessionId: session.id })
+  for (const level of ['temporary', 'RECENT', 'soon']) {
+    const result = publishPin({ session, label: 'X', text: 'Y', level, config: normalizeConfig({}), store, log: silent })
+    assert.equal(result.ok, false, level + ' 应当被拒绝')
+    assert.ok(result.reason.includes('permanent'), result.reason)
+    assert.ok(result.reason.includes('recent'), result.reason)
+    assert.ok(result.reason.includes('省略'), result.reason)
+    assert.ok(result.reason.includes(level), '回执写明收到的值')
+  }
+  assert.equal(session.events.length, 0, '拒绝时不写会话')
+  assert.equal(store.pins().length, 0, '拒绝时不落账')
+  assert.equal(store.pendingPins().length, 0, '拒绝时不留待投递记录')
+})
+
+test('resolvePins 按 label + level 配对：同名 recent 与 permanent 不互相套错', () => {
+  const records = [
+    { kind: 'pin', id: 'P', text: '永久正文', turn: 2, at: 200 },
+    { kind: 'pin', id: 'P', text: '近期正文', level: 'recent', turn: 9, at: 900 },
+  ]
+  const surface = [
+    { label: 'P', text: '【近期重要·第9轮·可能过时】 P\n近期正文' },
+    { label: 'P', text: pinPrefix + ' P\n永久正文' },
+  ]
+  const list = resolvePins(records, surface)
+  assert.equal(list.length, 2)
+  const recent = list.find((row) => row.level === 'recent')
+  assert.equal(recent.text, '近期正文')
+  assert.equal(recent.turn, 9)
+  assert.equal(recent.present, true)
+  assert.equal(recent.recorded, true)
+  assert.equal(recent.chars, surface[0].text.length)
+  const permanent = list.find((row) => row.level === 'permanent')
+  assert.equal(permanent.text, '永久正文')
+  assert.equal(permanent.turn, 2)
+  assert.ok(list.every((row) => row.present === true), '两条都配对上了，没有「被卷走」')
+
+  // 记录里只有一条时也能带上 level；旧记录没有 level 一律按 permanent。
+  const [only] = resolvePins([{ kind: 'pin', id: 'Q', text: 'x', level: 'recent', turn: 5 }], null)
+  assert.equal(only.level, 'recent')
+  assert.equal(only.chars, pinCharsOf('Q', 'x', 'recent', 5))
+  const [legacy] = resolvePins([{ kind: 'pin', id: 'Q', text: 'x' }], null)
+  assert.equal(legacy.level, 'permanent')
+})
+
 test('FoldStore 忽略半行、按会话隔离、能统计召回次数', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
   const store = new FoldStore({ homeDir, sessionId: 'a/b c' })
@@ -717,18 +849,19 @@ test('systemPromptText 支持占位替换与自定义文案', () => {
   assert.ok(text.includes('fold_recall'))
   assert.ok(text.includes('fold_pin'))
   assert.ok(text.includes('fold_config'))
-  assert.ok(text.includes('maxNoteTokens'))
-  // 记忆、技能这类「以后还要照着用」的内容靠 pin 逐字固化，插件不再按工具/路径自动保留。
+  // 记忆、技能这类「以后还要照着用」的内容靠 pin 逐字固化。
   assert.ok(text.includes('逐字'), '允许逐字抄原文')
   assert.ok(text.includes('加载技能'), '技能规则要先固化再执行')
   assert.equal(text.includes('读文件、写文件、加载技能的步骤不折叠'), false, '自动保护的说法已撤回')
-  // 提示词以保真为先：给正向许可，不拿「占上下文」的代价劝模型少记少取。
-  assert.ok(text.includes('保真'), '保真优先')
-  assert.ok(text.includes('积极召回'), '需要原文时积极召回')
-  assert.ok(text.includes('markdown 标题分节'), '长回复按标题分节')
-  assert.equal(text.includes('划算'), false, '不再比较 pin 与召回的成本')
-  assert.equal(text.includes('只固化真会再用'), false, '不再用代价暗示压缩')
-  assert.equal(text.includes('不敢记'), false, '不再强调省字')
+  // 长回复按标题分节：检查点与召回都靠它定位。
+  assert.ok(text.includes('markdown'), '长回复按标题分节')
+  // 近期重要：level 传 recent，头里带发布轮次，跨几轮后按可能过时处理。
+  assert.ok(text.includes('level 传 "recent"'))
+  assert.ok(text.includes('【近期重要·第N轮·可能过时】'))
+  // 不写 pin 的代价，只给正向许可。
+  for (const word of ['占上下文', '更省', '划算', '只固化真会再用', '只记必要', '不敢记']) {
+    assert.equal(text.includes(word), false, '不出现代价措辞：' + word)
+  }
 
   const custom = systemPromptText({ maxNoteTokens: 400, systemPromptText: '召回 {{recallTool}}，固化 {{pinTool}}，调 {{configTool}}，未知 {{keep}}' })
   assert.ok(custom.includes('召回 fold_recall'))

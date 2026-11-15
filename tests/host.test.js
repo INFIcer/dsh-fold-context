@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { assemble } from '../lib/host.js'
+import { createPinMessage } from '../lib/commit.js'
 import { FoldStore } from '../lib/store.js'
 import { FakeSession, assistantNode, makeCtx, toolNode, userNode } from './fakes.js'
 
@@ -73,6 +74,7 @@ test('turn/end 后把本轮折叠成一条检查点消息，并注入提示段�
 
   // fold_config 的 get 与 set 都走真实接线：set 要落盘，并让提示段当场重建。
   const configTool = toolNamed(ctx, 'fold_config')
+  const sectionBefore = ctx.sections.find((section) => section.name === 'fold-compression')
   const shown = await configTool.execute({ action: 'get' }, { agent: { session } })
   assert.equal(shown.ok, true)
   assert.ok(shown.text.includes('maxNoteTokens'))
@@ -83,8 +85,11 @@ test('turn/end 后把本轮折叠成一条检查点消息，并注入提示段�
   const onDisk = JSON.parse(readFileSync(join(homeDir, 'fold-config.json'), 'utf8'))
   assert.equal(onDisk.maxNoteTokens, 400)
   assert.equal(api.getConfig().maxNoteTokens, 400)
-  // 提示段随配置重建：新上限要出现在新版文案里。
-  assert.ok(sectionTextOf(ctx, session).includes('maxNoteTokens'))
+  // 提示段随配置重建：旧段被换掉，不能叠成两份。
+  const sectionAfter = ctx.sections.find((section) => section.name === 'fold-compression')
+  assert.notEqual(sectionAfter, sectionBefore, '配置改了要重建提示段')
+  assert.equal(ctx.sections.filter((section) => section.name === 'fold-compression').length, 1)
+  assert.ok(sectionTextOf(ctx, session).includes('按轮折叠'))
 
   const recalled = await toolNamed(ctx, 'fold_recall').execute({ id: 'f1' }, { agent: { session } })
   assert.equal(recalled.ok, true)
@@ -188,6 +193,43 @@ test('轮内发布的消息在插件重启后补投，注入成功后删掉待�
   assert.ok(pinEvent, '重启后应当补投未注入的重要消息')
   assert.ok(pinEvent.data.content[0].text.includes('字段名用 snake_case'))
   assert.equal(new FoldStore({ homeDir, sessionId: 'sess-restore' }).pendingPins().length, 0, '注入成功后待投递记录要删掉')
+  api2.stop()
+})
+
+test('重启补投时 recent 重要消息已在历史里就不再重复注入', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-restore-recent')
+  session.seed([userNode(1, '开始', 'user')])
+  emit(ctx, session, { type: 'turn/start', seq: 4, data: { turn: 5 } })
+  emit(ctx, session, { type: 'step/start', seq: 5, data: { turn: 5, step: 1 } })
+  const pin = await toolNamed(ctx, 'fold_pin').execute(
+    { label: '接口约定', text: '字段名用 snake_case', level: 'recent' },
+    { agent: { session } },
+  )
+  assert.equal(pin.ok, true, pin.text)
+  assert.ok(pin.text.includes('近期重要'), pin.text)
+  // 待投递记录带级别与发布轮次：重启补投要靠它还原同一条消息。
+  const pending = new FoldStore({ homeDir, sessionId: 'sess-restore-recent' }).pendingPins()
+  assert.equal(pending.length, 1)
+  assert.equal(pending[0].level, 'recent')
+  assert.equal(pending[0].turn, 5)
+  // 模拟进程退出：内存队列跟着运行时消失，只剩待投递记录。
+  api.stop()
+
+  // 重启：消息其实已经注入过，只是待投递记录没删掉。recent 头不能被当成「没发过」再补一条。
+  const ctx2 = makeCtx()
+  const api2 = assemble(ctx2, { homeDir, logFile: null })
+  const resumed = new FakeSession('sess-restore-recent')
+  const already = createPinMessage({ label: '接口约定', text: '字段名用 snake_case', level: 'recent', turn: 5 })
+  resumed.seed([userNode(1, '开始', 'user'), { type: 'user/message', seq: 2, data: already }])
+  emit(ctx2, resumed, { type: 'turn/start', seq: 4, data: { turn: 6 } })
+  emit(ctx2, resumed, { type: 'turn/end', seq: 5, data: { turn: 6, reason: { kind: 'stop' } } })
+  await tick()
+
+  assert.equal(sessionPinEvents(resumed), 0, '已经在历史里的 recent 重要消息不该再补投')
+  assert.equal(new FoldStore({ homeDir, sessionId: 'sess-restore-recent' }).pendingPins().length, 0, '去重后待投递记录要删掉')
   api2.stop()
 })
 
