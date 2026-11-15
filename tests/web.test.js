@@ -6,9 +6,11 @@ import {
   createCompositionHandler,
   createConfigHandler,
   createStatsHandler,
+  createTurnHandler,
   createViewHandler,
   registerStatsRoute,
   statsPath,
+  turnPath,
   viewPath,
 } from '../lib/web.js'
 
@@ -110,7 +112,7 @@ test('stats 路由对不存在的会话回 404，而不是 200 全零', () => {
   assert.match(JSON.parse(res.state.body).error, /session-/)
 })
 
-test('registerStatsRoute 挂四条 exact 路由并随 dispose 撤销', () => {
+test('registerStatsRoute 挂六条 exact 路由并随 dispose 撤销', () => {
   const routes = []
   const ctx = {
     webServer: {
@@ -121,8 +123,8 @@ test('registerStatsRoute 挂四条 exact 路由并随 dispose 撤销', () => {
     },
   }
   const handle = registerStatsRoute({ ctx, log: quietLog, makeStore: () => makeStore([]), getConfig: () => ({}) })
-  assert.equal(routes.length, 4)
-  assert.deepEqual(routes.map((route) => route.path), [statsPath, viewPath, compositionPath, configPath])
+  assert.equal(routes.length, 5)
+  assert.deepEqual(routes.map((route) => route.path), [statsPath, viewPath, turnPath, compositionPath, configPath])
   for (const route of routes) assert.equal(route.kind, 'exact')
   handle.dispose()
   for (const route of routes) assert.equal(route.disposed, true)
@@ -161,7 +163,7 @@ const demoMessages = [
   { id: 'a1', role: 'assistant', content: [{ type: 'reasoning', text: '先看目录' }, { type: 'text', text: '好的，开始搬。' }], source: { kind: 'model', provider: 'p', model: 'm' } },
 ]
 
-test('view 路由返回逐轮 JSON，且不带整段原文', () => {
+test('view 路由返回逐轮 JSON：轮内正文按需拉，首包只有分组头与重要消息', () => {
   const records = [
     { kind: 'fold', id: 'f1', turn: 1, at: 1, chars: 900, note: '【已折叠历史】 第 1 轮已折叠，原文用 fold_recall("f1") 召回', items: [{ seq: 1, text: '[思考] ' + 'x'.repeat(400) }] },
   ]
@@ -176,16 +178,21 @@ test('view 路由返回逐轮 JSON，且不带整段原文', () => {
   assert.equal(res.state.status, 200)
   const body = JSON.parse(res.state.body)
   assert.equal(body.ok, true)
+  assert.equal(body.version, 5)
   assert.equal(body.sessionId, 's1')
   assert.ok(Array.isArray(body.groups) && body.groups.length > 0)
   assert.equal(body.config.minFoldRatio, 0.4)
   for (const group of body.groups) {
-    for (const entry of group.entries) {
-      assert.equal('text' in entry, false)
-      assert.ok(Array.isArray(entry.blocks))
-    }
+    assert.ok(Array.isArray(group.pins))
+    if (group.kind === 'system') assert.ok(group.entries.length > 0, '系统提示词正文要随首屏给')
+    else assert.equal(group.entries.length, 0, '轮内正文不该进首包')
   }
-  assert.ok(JSON.stringify(body).includes('先看目录'))
+  // 分组头里的用户与回复只用于 150 字预览；逐块正文与折叠原文留给 /fold-turn。
+  const text = JSON.stringify(body.groups)
+  assert.ok(text.includes('把仓库放到 E 盘'))
+  assert.equal(text.includes('先看目录'), false)
+  // 构成图归 /fold-composition，首包不再白算一遍。
+  assert.equal('composition' in body, false)
 })
 
 test('view 路由带上重要消息，以及系统提示词的版本与差异', () => {
@@ -214,10 +221,15 @@ test('view 路由带上重要消息，以及系统提示词的版本与差异', 
   assert.equal(systems[1].diff.del, 1)
   assert.deepEqual(body.pins.map((pin) => pin.label), ['结论'])
   assert.ok(body.pins[0].blocks.length > 0)
-  assert.equal(body.version, 3)
+  // 重要消息要常显在轮卡片之外，所以正文随首包走；普通条目则等展开时才拉。
+  const pinGroup = body.groups.find((group) => group.pins.length > 0)
+  assert.ok(pinGroup, '重要消息应挂在一个分组上')
+  assert.deepEqual(pinGroup.pins.map((pin) => pin.pinLabel), ['结论'])
+  assert.ok(pinGroup.pins[0].blocks.length > 0)
+  assert.equal(body.version, 5)
 })
 
-test('view 路由给出上下文构成：分类、折叠后与不折叠两套占比、逐块累计', () => {
+test('view 不再回上下文构成：构成图归 /fold-composition', () => {
   const messages = [
     { id: 's1', role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system' } },
     ...demoMessages,
@@ -232,26 +244,8 @@ test('view 路由给出上下文构成：分类、折叠后与不折叠两套占
   const res = fakeRes()
   handler(fakeReq(viewPath + '?session=s4'), res)
   const body = JSON.parse(res.state.body)
-  const composition = body.composition
-  assert.deepEqual(composition.categories.map((item) => item.key), [
-    'system',
-    'systemHistory',
-    'user',
-    'assistant',
-    'tools',
-    'inject',
-    'checkpoint',
-    'pin',
-  ])
-  assert.equal(composition.points.length, body.groups.length)
-  assert.ok(composition.totals.folded.system > 0)
-  assert.ok(composition.totals.folded.user > 0)
-  assert.ok(composition.totals.folded.assistant > 0)
-  assert.ok(composition.totals.folded.pin > 0)
-  assert.ok(composition.totals.sum.folded > 0)
-  const last = composition.points[composition.points.length - 1]
-  assert.deepEqual(last.cumulative.folded, composition.totals.folded)
-  assert.ok(JSON.stringify(composition).length > 0)
+  assert.equal(body.composition, undefined)
+  assert.ok(body.groups.length > 0)
 })
 
 test('composition 路由只回构成数据，格式与 view 的 composition 一致', () => {
@@ -334,6 +328,106 @@ test('view 路由缺参数 400、找不到会话 404', () => {
   const gone = fakeRes()
   handler(fakeReq(viewPath + '?session=gone'), gone)
   assert.equal(gone.state.status, 404)
+})
+
+test('turn 路由按序号返回这一轮的条目正文，重要消息不重复下发', () => {
+  const records = [
+    { kind: 'fold', id: 'f1', turn: 1, at: 1, chars: 900, note: '【已折叠历史】 第 1 轮已折叠，原文用 fold_recall("f1") 召回', items: [{ seq: 1, text: '[思考] ' + 'x'.repeat(400) }] },
+  ]
+  const messages = [
+    ...demoMessages,
+    { id: 'p1', role: 'user', content: [{ type: 'text', text: '【重要·永不折叠】 结论' }], source: { kind: 'fold-pin', label: '结论' } },
+  ]
+  const session = fakeSession('s1', messages)
+  const view = createViewHandler({ resolveSessionById: () => session, makeStore: () => makeStore(records), getConfig: () => ({}), log: quietLog })
+  const viewRes = fakeRes()
+  view(fakeReq(viewPath + '?session=s1'), viewRes)
+  const groups = JSON.parse(viewRes.state.body).groups
+  const turnGroup = groups.find((group) => group.kind === 'turn')
+  assert.ok(turnGroup, '应有一个轮分组')
+  const ordinal = turnGroup.ordinal
+  assert.ok(ordinal > 0)
+  // 首包里这一轮没有条目，正文只在 /fold-turn
+  assert.equal(turnGroup.entries.length, 0)
+  assert.equal(turnGroup.pins.length, 1)
+
+  const handler = createTurnHandler({ resolveSessionById: () => session, makeStore: () => makeStore(records), getConfig: () => ({}), log: quietLog })
+  const res = fakeRes()
+  handler(fakeReq(turnPath + '?session=s1&ordinal=' + ordinal), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.ordinal, ordinal)
+  assert.ok(Array.isArray(body.entries) && body.entries.length > 0)
+  assert.ok(JSON.stringify(body.entries).includes('先看目录'))
+  for (const entry of body.entries) {
+    assert.ok(Array.isArray(entry.blocks))
+    assert.equal(entry.isPin, false, '重要消息已在首包里，别重复下发')
+  }
+})
+
+test('turn 路由把折叠原文载荷一起给到，展开检查点才能对照原文', () => {
+  const fold = {
+    kind: 'fold',
+    id: 'f1',
+    turn: 1,
+    at: 1,
+    chars: 400,
+    note: '【已折叠历史】 第 1 轮已折叠，原文用 fold_recall("f1") 召回',
+    // 载荷里的条目是「一行行文本」，展开时再按 [思考] / [工具结果] 这类前缀切成块。
+    items: [{ seq: 2, text: '[思考] 原始思考 ' + 'x'.repeat(380) }],
+  }
+  const messages = [
+    { id: 'u1', role: 'user', content: [{ type: 'text', text: '把仓库放到 E 盘' }], source: { kind: 'user' } },
+    { id: 'c1', role: 'user', content: [{ type: 'text', text: '【已折叠历史】 第 1 轮已折叠，原文用 fold_recall("f1") 召回' }], source: { kind: 'checkpoint', foldId: 'f1' } },
+  ]
+  const store = {
+    readAll: () => [fold],
+    folds: () => new Map([['f1', fold]]),
+    pins: () => [],
+  }
+  const session = fakeSession('s1', messages)
+  const view = createViewHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const viewRes = fakeRes()
+  view(fakeReq(viewPath + '?session=s1'), viewRes)
+  const turnGroup = JSON.parse(viewRes.state.body).groups.find((group) => group.kind === 'turn')
+  const handler = createTurnHandler({ resolveSessionById: () => session, makeStore: () => store, getConfig: () => ({}), log: quietLog })
+  const res = fakeRes()
+  handler(fakeReq(turnPath + '?session=s1&ordinal=' + turnGroup.ordinal), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  const checkpoint = body.entries.find((entry) => entry.isCheckpoint)
+  assert.ok(checkpoint, '检查点条目应在轮正文里')
+  assert.equal(checkpoint.foldRecord.id, 'f1')
+  assert.ok(checkpoint.foldRecord.items.length > 0)
+  assert.ok(JSON.stringify(checkpoint.foldRecord).includes('原始思考'))
+})
+
+test('turn 路由缺参数 400、找不到会话 404、序号越界 404', () => {
+  const handler = createTurnHandler({
+    resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', demoMessages) : undefined),
+    makeStore: () => makeStore([]),
+    getConfig: () => ({}),
+    log: quietLog,
+  })
+  const missingSession = fakeRes()
+  handler(fakeReq(turnPath), missingSession)
+  assert.equal(missingSession.state.status, 400)
+  assert.match(JSON.parse(missingSession.state.body).error, /session/)
+
+  const missingOrdinal = fakeRes()
+  handler(fakeReq(turnPath + '?session=s1'), missingOrdinal)
+  assert.equal(missingOrdinal.state.status, 400)
+  assert.match(JSON.parse(missingOrdinal.state.body).error, /ordinal/)
+
+  const gone = fakeRes()
+  handler(fakeReq(turnPath + '?session=gone&ordinal=0'), gone)
+  assert.equal(gone.state.status, 404)
+
+  const outOfRange = fakeRes()
+  handler(fakeReq(turnPath + '?session=s1&ordinal=99'), outOfRange)
+  assert.equal(outOfRange.state.status, 404)
+  assert.match(JSON.parse(outOfRange.state.body).error, /刷新/)
 })
 
 test('view 路由带上 provider 最近一次回报，供「实际请求」对照', () => {

@@ -73,10 +73,20 @@ window.__ModuleLoader__.load({
       return (value * 100).toFixed(1) + '%'
     }
 
+    // 摘要只取前 limit 个可见字符：先把开头一段压平，够长就截，不够再往后看。
+    // 不能上全局替换——一条工具输出可能有几十万字，每张收起的卡片都扫一遍就是白烧 CPU。
     function preview(text, limit) {
-      var value = String(text === null || text === undefined ? '' : text).replace(/\s+/g, ' ').trim()
-      if (!value) return '（没有文字）'
-      return value.length <= limit ? value : value.slice(0, limit) + '…'
+      var source = String(text === null || text === undefined ? '' : text)
+      var got = Math.max(limit * 4, 400)
+      var flat = ''
+      while (true) {
+        var cut = Math.min(got, source.length)
+        flat = source.slice(0, cut).replace(/\s+/g, ' ').trim()
+        if (flat.length > limit || cut >= source.length) break
+        got = cut * 2
+      }
+      if (!flat) return '（没有文字）'
+      return flat.length <= limit ? flat : flat.slice(0, limit) + '…'
     }
 
     function clock(at) {
@@ -724,6 +734,30 @@ window.__ModuleLoader__.load({
       }]
     }
 
+    // 跳转落点：打开目标 details（顺带触发按需加载）、滚到看得见的地方、短暂描边。
+    // gen 每次跳转都变，依赖它才能在同一个落点上连续跳两次。
+    function useReveal(ref, active, gen, withFlash) {
+      var flash = react.useState(false)
+      react.useEffect(function () {
+        if (!active || !ref.current) return
+        var node = ref.current
+        if (node.open !== true) node.open = true
+        var scroll = setTimeout(function () {
+          if (typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        }, 80)
+        var clear = null
+        if (withFlash) {
+          flash[1](true)
+          clear = setTimeout(function () { flash[1](false) }, 1800)
+        }
+        return function () {
+          clearTimeout(scroll)
+          if (clear) clearTimeout(clear)
+        }
+      }, [gen])
+      return flash[0]
+    }
+
     function firstTextOf(entry) {
       var blocks = Array.isArray(entry && entry.blocks) ? entry.blocks : []
       for (var i = 0; i < blocks.length; i += 1) {
@@ -1342,6 +1376,77 @@ window.__ModuleLoader__.load({
       var group = props.group || {}
       if (group.kind === 'system') return h(SystemCard, { group: group, wide: props.wide, current: props.current })
       var opened = useLazyOpen()
+      var ordinal = typeof group.ordinal === 'number' ? group.ordinal : -1
+      var stamp = typeof props.stamp === 'number' ? props.stamp : 0
+      var detailsRef = react.useRef(null)
+      // 目标轮次对上了就展开：正文随展开按需拉，拉回来之后 EntryView 再定位到具体条目。
+      var jumpFocus = props.focus
+      var focusHere = jumpFocus && jumpFocus.o === ordinal
+      useReveal(detailsRef, focusHere, focusHere ? jumpFocus.gen : 0, false)
+      var bodyState = react.useState({ status: 'idle', stamp: 0, entries: [], error: '' })
+      var body = bodyState[0]
+      var setBody = bodyState[1]
+      var attemptState = react.useState(0)
+
+      // 展开才拉；取过同一版数据就不再重复拉，刷新后 stamp 变化才重取。
+      // 关掉再打开会中断在途请求，所以这里不拦 loading 状态：重新打开就重新拉一次。
+      react.useEffect(function () {
+        if (!opened[0] || ordinal < 0) return
+        if (body.status === 'ready' && body.stamp === stamp) return
+        var alive = true
+        var controller = typeof AbortController === 'function' ? new AbortController() : null
+        setBody({ status: 'loading', stamp: stamp, entries: [], error: '' })
+        fetch('/fold-turn?session=' + encodeURIComponent(props.sessionId || '') + '&ordinal=' + ordinal, controller ? { signal: controller.signal } : undefined)
+          .then(readJson)
+          .then(function (result) {
+            if (!alive) return
+            setBody({ status: 'ready', stamp: stamp, entries: Array.isArray(result.entries) ? result.entries : [], error: '' })
+          })
+          .catch(function (error) {
+            if (!alive || (error && error.name === 'AbortError')) return
+            setBody({ status: 'error', stamp: stamp, entries: [], error: String(error && error.message ? error.message : error) })
+          })
+        return function () {
+          alive = false
+          if (controller) controller.abort()
+        }
+      }, [opened[0], ordinal, attemptState[0], stamp])
+
+      // 合计标签也能点：这一轮的正文按需拉，拉回来再列「哪几次调用 / 哪几段被取回」。
+      // 标签在 summary 里，点它必须先掐掉默认的展开——否则点标签只会把整轮展开。
+      var openTurnPanel = function (kind) {
+        if (!NAV.refs) return
+        var title = '第 ' + (typeof group.turn === 'number' ? group.turn : group.ordinal) + ' 轮 · ' +
+          (kind === 'calls' ? '召回调用' : kind === 'searched' ? '被检索的分段目录' : '被召回的段')
+        NAV.refs({ title: title, items: [], note: '正在读取这一轮的正文…' })
+        var gen = NAV.panelGen || 0
+        loadTurnEntries(props.sessionId, ordinal, stamp).then(function (slot) {
+          // 迟到的结果不再顶掉已经换过的面板（用户可能已经关了或点了别的标签）。
+          if ((NAV.panelGen || 0) !== gen) return
+          if (slot.status !== 'ready') {
+            NAV.refs({ title: title, items: [], note: '读取这一轮的正文失败：' + (slot.error || '未知原因') })
+            return
+          }
+          var items = kind === 'calls'
+            ? turnCallItems(slot.entries, ordinal)
+            : kind === 'searched' ? turnSearchedItems(slot.entries) : turnRecalledItems(slot.entries)
+          NAV.refs({
+            title: title,
+            items: items,
+            note: items.length === 0
+              ? '这一轮没有' + (kind === 'calls' ? '召回调用' : kind === 'searched' ? '被检索的目录' : '被召回的段') + '。'
+              : (kind === 'calls' ? '点一条跳到那次调用的位置。' : '点一条跳到那次调用的条目。'),
+          })
+        })
+      }
+      var chipClick = function (kind) {
+        return function (event) {
+          event.preventDefault()
+          event.stopPropagation()
+          openTurnPanel(kind)
+        }
+      }
+
       var label = typeof group.turn === 'number' ? '第 ' + group.turn + ' 轮' : '第 ' + (group.ordinal || 0) + ' 段'
       var tags = []
       var foldIds = Array.isArray(group.foldIds) ? group.foldIds : []
@@ -1371,30 +1476,69 @@ window.__ModuleLoader__.load({
           h('span', {}, preview(group.replyText || group.replyNote || '', 150))
         )
       )
-      var entries = Array.isArray(group.entries) ? group.entries : []
-      var pins = []
-      var rest = []
-      for (var ei = 0; ei < entries.length; ei += 1) {
-        var entry = entries[ei]
-        if (entry && entry.isPin) pins.push(entry)
-        else rest.push(entry)
-      }
       // 重要消息不从轮里删掉，而是提到轮卡片之外常显：折叠这一轮也能一眼看到。
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
-        h('details', { style: C.turn, onToggle: opened[1] },
-          summary,
-          opened[0]
-            ? h('div', { style: C.turnBody }, rest.map(function (item, index) {
-                return h(EntryView, { key: 'e' + index, entry: item, wide: props.wide, config: props.config })
+      var pins = Array.isArray(group.pins) ? group.pins : []
+      var bodyNode = null
+      if (opened[0]) {
+        if (body.status === 'ready') {
+          bodyNode = body.entries.length === 0
+            ? h('div', { style: C.turnBody }, h('div', { style: C.sub }, '这一轮没有可展开的正文。'))
+            : h('div', { style: C.turnBody }, body.entries.map(function (item, index) {
+                return h(EntryView, { key: 'e' + index, entry: item, wide: props.wide, config: props.config, focus: focusHere ? jumpFocus : null })
               }))
-            : null
-        ),
+        } else if (body.status === 'error') {
+          bodyNode = h('div', { style: C.turnBody },
+            h('div', { style: { fontSize: '12px', color: '#f87171' } }, '这一轮的正文读取失败：' + body.error),
+            h('button', {
+              style: Object.assign({}, C.button, { marginTop: '6px' }),
+              onClick: function () { attemptState[1](function (value) { return value + 1 }) },
+            }, '重试')
+          )
+        } else {
+          bodyNode = h('div', { style: C.turnBody }, h('div', { style: C.sub }, '正在读取这一轮的正文…'))
+        }
+      }
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+        h('details', { ref: detailsRef, style: C.turn, onToggle: opened[1] }, summary, bodyNode),
         pins.map(function (pin, index) {
-          return h(EntryView, { key: 'pin' + index, entry: pin, wide: props.wide, config: props.config })
+          return h(EntryView, { key: 'pin' + index, entry: pin, wide: props.wide, config: props.config, focus: focusHere ? jumpFocus : null })
         })
       )
     }
 
+    // 宿主每重渲染一次都会重建这一页的元素树：props 没变就跳过，别让展开状态与子树白重算。
+    var MemoTurnCard = typeof react.memo === 'function' ? react.memo(TurnCard) : TurnCard
+
+    // 引用面板：点标签打开，列出去处，点一条就跳。只回答「去哪儿」，不复制原文——
+    // 原文已经在页面里，再贴一份只会让两处对不上。
+    var PANEL_BACKDROP = {
+      position: 'fixed', inset: '0', zIndex: 60,
+      display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+      paddingTop: '12vh', background: 'rgba(0,0,0,.38)',
+    }
+    var PANEL_BOX = {
+      width: 'min(560px, calc(100vw - 32px))',
+      display: 'flex', flexDirection: 'column', gap: '8px',
+      padding: '14px 16px', borderRadius: '12px',
+      background: 'Canvas', color: 'CanvasText',
+      border: '1px solid rgba(128,128,128,.4)',
+      boxShadow: '0 18px 40px rgba(0,0,0,.35)',
+    }
+    var PANEL_LIST = {
+      overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px',
+      maxHeight: '40vh', paddingRight: '4px', scrollbarWidth: 'thin',
+    }
+    var PANEL_ITEM = {
+      fontSize: '12px', textAlign: 'left', padding: '5px 8px', borderRadius: '6px',
+      border: '1px solid rgba(128,128,128,.28)', background: 'transparent', color: 'inherit', cursor: 'pointer',
+      display: 'flex', flexDirection: 'column', gap: '2px',
+    }
+    // 引用条目的两行：段号一行、正文一行。正文是段开头的一段话，读一眼就知道那条段是什么。
+    var PANEL_ITEM_HEAD = { fontSize: '12px', lineHeight: '17px', fontWeight: 600 }
+    var PANEL_ITEM_PREVIEW = { fontSize: '11px', lineHeight: '16px', opacity: 0.72, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }
+    var PANEL_NOTE_PREVIEW = { fontSize: '11px', lineHeight: '16px', opacity: 0.78, whiteSpace: 'pre-wrap', wordBreak: 'break-word', padding: '4px 8px', borderRadius: '6px', background: 'rgba(128,128,128,.10)' }
+
+    // 面板条目的落点键：只有「跳到某一段」的条目才有，用来按段去取预览。
     function ModelView(props) {
       var sessionId = props.sessionId
       var state = react.useState({ status: 'loading', data: null, error: '' })
@@ -1486,7 +1630,16 @@ window.__ModuleLoader__.load({
         actualNote,
         warns.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, warns) : null,
         groups.map(function (group, index) {
-          return h(TurnCard, { key: 'g' + index, group: group, wide: wide[0], config: data.config, current: index === lastSystemIndex })
+          return h(MemoTurnCard, {
+            key: 'g' + index,
+            group: group,
+            wide: wide[0],
+            config: data.config,
+            current: index === lastSystemIndex,
+            sessionId: sessionId,
+            stamp: typeof data.generatedAt === 'number' ? data.generatedAt : 0,
+            focus: focusState[0],
+          })
         })
       )
     }

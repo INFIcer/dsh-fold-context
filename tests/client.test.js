@@ -171,8 +171,8 @@ test('构成面板、图表与重要消息行能渲染（冒烟）', () => {
       folded: true,
       foldIds: ['f2'],
       pinLabels: ['结论'],
-      entries: [
-        { index: 0, role: 'user', sourceKind: 'user', chars: 20, blocks: [{ kind: 'text', text: 'hi' }] },
+      // 首包只有分组头与重要消息；普通条目展开这一轮时才从 /fold-turn 取。
+      pins: [
         { index: 1, role: 'user', sourceKind: 'fold-pin', isPin: true, pinLabel: '结论', seq: 9, chars: 12, blocks: [{ kind: 'text', text: 'pin' }] },
       ],
     },
@@ -328,6 +328,16 @@ test('客户端不再用金额描述折叠收益', () => {
   const source = readFileSync(clientFile, 'utf8')
   assert.equal(source.includes("折叠收益', value: '+' + formatMoney"), false)
   assert.equal(source.includes('moneyNote'), false)
+})
+
+test('模型视角：轮内正文按需拉，首包只带分组头与重要消息', () => {
+  const source = readFileSync(clientFile, 'utf8')
+  assert.ok(source.includes("fetch('/fold-turn?session='"), '展开一轮时才去取这一轮的正文')
+  assert.ok(source.includes('正在读取这一轮的正文…'))
+  assert.ok(source.includes('这一轮的正文读取失败'))
+  // 卡片外的常显部分只认 group.pins；轮内条目不再从首包读
+  assert.ok(source.includes('var pins = Array.isArray(group.pins) ? group.pins : []'))
+  assert.equal(source.includes('var entries = Array.isArray(group.entries) ? group.entries : []\n      var pins'), false)
 })
 
 test('参数表单只挂在插件页，折叠 tab 不再有设置入口', () => {
