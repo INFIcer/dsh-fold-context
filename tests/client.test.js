@@ -198,6 +198,51 @@ test('构成面板、图表与重要消息行能渲染（冒烟）', () => {
   assert.equal(unfoldedTrack.children[1].props.style.left, foldedWidth.toFixed(2) + '%')
 })
 
+test('模型视角：近期重要与长期重要的卡片分色，旧字符串标签仍能渲染', () => {
+  const { module } = loadClient()
+  const components = module.__test
+  const pinEntry = (patch) => Object.assign({
+    index: 1, role: 'user', sourceKind: 'fold-pin', isPin: true,
+    seq: 9, chars: 12, blocks: [{ kind: 'text', text: '正文' }],
+  }, patch)
+
+  const recent = JSON.stringify(components.EntryView({
+    entry: pinEntry({ pinLevel: 'recent', pinLabel: '临时结论', sourceLabel: '近期重要（可能过时）' }),
+  }))
+  // 近期重要：角色文字改口径，整块换天蓝底与蓝色竖线。
+  assert.ok(recent.includes('近期重要「临时结论」'), recent.slice(0, 400))
+  assert.ok(recent.includes('#0284c7'), '近期重要用天蓝')
+  assert.ok(recent.includes('rgba(2,132,199,.10)'), '近期重要用浅蓝底')
+  assert.equal(recent.includes('#8250df'), false, '近期重要不该再用长期重要的紫')
+
+  const permanent = JSON.stringify(components.EntryView({
+    entry: pinEntry({ pinLevel: 'permanent', pinLabel: '部署路径', sourceLabel: '重要消息（永不折叠）' }),
+  }))
+  assert.ok(permanent.includes('重要消息「部署路径」'))
+  assert.ok(permanent.includes('#8250df'), '长期重要保持紫色')
+  assert.equal(permanent.includes('#0284c7'), false)
+
+  // 旧载荷：标签是纯字符串、条目没有 pinLevel，仍按长期重要渲染。
+  const legacy = JSON.stringify(components.TurnCard({
+    group: { kind: 'turn', turn: 3, folded: true, foldIds: ['f3'], pinLabels: ['旧结论'], pins: [] },
+  }))
+  assert.ok(legacy.includes('重要消息·旧结论'), legacy.slice(0, 500))
+  assert.ok(legacy.includes('#8250df'))
+
+  // 新载荷：标签带级别，近期重要蓝色、长期重要紫色，轮卡片上分得开。
+  const mixed = JSON.stringify(components.TurnCard({
+    group: {
+      kind: 'turn', turn: 4, folded: true, foldIds: ['f4'],
+      pinLabels: [{ label: '临时结论', level: 'recent' }, { label: '部署路径', level: 'permanent' }],
+      pins: [],
+    },
+  }))
+  assert.ok(mixed.includes('近期重要·临时结论'), mixed.slice(0, 600))
+  assert.ok(mixed.includes('重要消息·部署路径'))
+  assert.ok(mixed.includes('#0284c7'))
+  assert.ok(mixed.includes('#8250df'))
+})
+
 test('成本提示只拿「归折叠管的部分」跟实测比，并点明两笔额外开销', () => {
   const { module } = loadClient()
   const noteFor = module.__test.costDriftNote

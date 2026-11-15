@@ -301,6 +301,21 @@ test('召回调用标在条目与折叠段上，并汇总到轮次标签', () =>
   assert.deepEqual(recalledPart.recallCalls, [{ id: '', query: 'fold-view MB 17', parts: '', via: '' }])
 })
 
+test('轮卡片的 pin 标签带级别：近期重要标 recent，长期重要标 permanent', () => {
+  const groups = buildTurnGroups({
+    entries: [
+      userEntry('开始'),
+      entry({ isPin: true, sourceKind: 'fold-pin', pinLabel: '部署路径', pinLevel: 'permanent', sourceLabel: '重要消息（永不折叠）' }),
+      entry({ isPin: true, sourceKind: 'fold-pin', pinLabel: '临时结论', pinLevel: 'recent', sourceLabel: '近期重要（可能过时）' }),
+    ],
+  })
+  const turn = groups.find((group) => group.kind === 'turn')
+  assert.deepEqual(turn.pinLabels, [
+    { label: '部署路径', level: 'permanent' },
+    { label: '临时结论', level: 'recent' },
+  ])
+})
+
 test('折叠段的调用带块归属：标记只落在调用块上', () => {
   // 一个折叠段里常常先有思考、再有调用，页面按块切成两段，标记只能标到后面那一段。
   const nested = 'await tools.fold_recall({ id: "f2", parts: ["1"] })'

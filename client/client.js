@@ -260,6 +260,32 @@ window.__ModuleLoader__.load({
       return { background: pair[0], borderLeft: '3px solid ' + pair[1] }
     }
 
+    // 近期重要（可能过时）与长期重要分色：前者天蓝、后者保持紫。天蓝比用户原话的
+    // #2f6feb 更浅一档，同屏不会把「刚发布的临时结论」看成「用户说的话」。
+    var PIN_LEVEL_COLORS = {
+      recent: { text: '#0284c7', tint: 'rgba(2,132,199,.10)' },
+      permanent: { text: '#8250df', tint: 'rgba(130,80,223,.10)' },
+    }
+
+    function pinLevelOf(entry) {
+      return entry && entry.pinLevel === 'recent' ? 'recent' : 'permanent'
+    }
+
+    // 卡片整块配色：pin 按级别取，其它类型仍按消息类型取。
+    function entryTint(entry) {
+      if (entryKindOf(entry) === 'pin') {
+        var level = PIN_LEVEL_COLORS[pinLevelOf(entry)]
+        return { background: level.tint, borderLeft: '3px solid ' + level.text }
+      }
+      return tint(entryKindOf(entry))
+    }
+
+    // pin 的角色文字带级别，与卡片颜色同一套口径。
+    function pinRoleLabel(entry) {
+      var prefix = pinLevelOf(entry) === 'recent' ? '近期重要' : '重要消息'
+      return prefix + '「' + ((entry && entry.pinLabel) || '') + '」'
+    }
+
     // 召回标记按方向分三种颜色：被召回红、召回黄、检索橘黄。三种色相在正文灰底上互相拉开，
     // 再加同色浅底与不透明的文字——C.tag 默认半透明灰边，那种规格在几万字的清单里会沉进正文，
     // 扫不出来就等于没标。账本里「召回成本」的红是数字不是标签，两者不在同一处，不会混。
@@ -1568,7 +1594,7 @@ window.__ModuleLoader__.load({
     function entryNameOf(entry) {
       var source = entry || {}
       if (source.isCheckpoint) return '折叠摘要 ' + (source.foldId || '')
-      if (source.isPin) return '重要消息「' + (source.pinLabel || '') + '」'
+      if (source.isPin) return pinRoleLabel(source)
       return source.roleLabel || source.role || '消息'
     }
 
@@ -2025,7 +2051,6 @@ window.__ModuleLoader__.load({
 
     function EntryView(props) {
       var entry = props.entry || {}
-      var kind = entryKindOf(entry)
       var opened = useLazyOpen()
       var ownRef = react.useRef(null)
       // 跳转落点：条目序号对上了就展开、滚过去、描一下边。
@@ -2035,7 +2060,7 @@ window.__ModuleLoader__.load({
       var role = entry.isCheckpoint
         ? '折叠摘要 ' + (entry.foldId || '')
         : entry.isPin
-          ? '重要消息「' + (entry.pinLabel || '') + '」'
+          ? pinRoleLabel(entry)
           : (entry.roleLabel || entry.role || '消息')
       var meta = []
       if (entry.sourceLabel) meta.push(entry.sourceLabel)
@@ -2064,7 +2089,7 @@ window.__ModuleLoader__.load({
       )
       return h('details', {
         ref: ownRef,
-        style: flash ? Object.assign({}, C.entry, tint(kind), FLASH_STYLE) : Object.assign({}, C.entry, tint(kind)),
+        style: flash ? Object.assign({}, C.entry, entryTint(entry), FLASH_STYLE) : Object.assign({}, C.entry, entryTint(entry)),
         onToggle: opened[1],
       },
         summary,
@@ -2623,9 +2648,18 @@ window.__ModuleLoader__.load({
         }, '被检索 ' + searchedCount + ' 次' + (searchedPartCount > 0 ? ' · ' + searchedPartCount + ' 段次' : '')))
       }
       // 重要消息按时间顺序贴在它出现的这一轮旁边，不再在页顶做汇总。
+      // 标签按级别分色：近期重要天蓝、长期重要紫；旧载荷里的纯字符串按长期重要渲染。
       var pinLabels = Array.isArray(group.pinLabels) ? group.pinLabels : []
       for (var pi = 0; pi < pinLabels.length; pi += 1) {
-        tags.push(h('span', { key: 'pin' + pi, style: Object.assign({}, C.tag, { color: '#8250df', borderColor: 'rgba(130,80,223,.45)' }) }, '重要消息·' + pinLabels[pi]))
+        var pinLabel = pinLabels[pi]
+        var pinText = typeof pinLabel === 'string' ? pinLabel : pinLabel && typeof pinLabel.label === 'string' ? pinLabel.label : ''
+        var pinRecent = !!pinLabel && typeof pinLabel === 'object' && pinLabel.level === 'recent'
+        tags.push(h('span', {
+          key: 'pin' + pi,
+          style: Object.assign({}, C.tag, pinRecent
+            ? { color: PIN_LEVEL_COLORS.recent.text, borderColor: 'rgba(2,132,199,.45)' }
+            : { color: PIN_LEVEL_COLORS.permanent.text, borderColor: 'rgba(130,80,223,.45)' }),
+        }, (pinRecent ? '近期重要·' : '重要消息·') + pinText))
       }
       var meta = (group.steps || 0) + ' 步 · ' + formatCharsTokens(group.chars) + (group.folded ? ' ← 原文 ' + formatCharsTokens(group.unfoldedChars) : '')
       var summary = h('summary', { style: C.turnSummary },

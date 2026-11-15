@@ -7,6 +7,7 @@ import {
   buildReportModel,
   buildTextReport,
   collectRecords,
+  messageEntries,
   reconstructUnfolded,
   summarizeModelView,
 } from '../lib/inspect.js'
@@ -29,6 +30,10 @@ function checkpoint(foldId, text) {
 
 function pinMessage(label, text) {
   return message('user', '【重要·永不折叠】 ' + label + '\n' + text, { source: { kind: 'fold-pin', label } })
+}
+
+function recentPinMessage(label, text) {
+  return message('user', '【近期重要·第3轮·可能过时】 ' + label + '\n' + text, { source: { kind: 'fold-pin', label } })
 }
 
 function fixture() {
@@ -97,6 +102,29 @@ test('summarizeModelView 统计角色、检查点、pin 与 token', () => {
   assert.equal(pin.isPin, true)
   assert.ok(pin.sourceLabel.indexOf('重要消息') >= 0)
   assert.ok(pin.preview.indexOf('部署路径') >= 0)
+})
+
+test('pin 条目带级别：近期重要与长期重要的标签与 pinLevel 分开', () => {
+  const messages = [
+    message('user', '开始'),
+    pinMessage('部署路径', '在 E:\\dsh\\deploy.ps1'),
+    recentPinMessage('临时结论', '先按 A 方案'),
+  ]
+  const folded = summarizeModelView({ derivedMessages: messages })
+  assert.equal(folded.messages[0].pinLevel, '', '普通消息没有级别')
+  assert.equal(folded.messages[1].pinLevel, 'permanent')
+  assert.ok(folded.messages[1].sourceLabel.indexOf('重要消息') >= 0)
+  assert.equal(folded.messages[2].pinLevel, 'recent')
+  assert.ok(folded.messages[2].sourceLabel.indexOf('近期重要') >= 0)
+
+  const unfolded = reconstructUnfolded({ derivedMessages: messages, folds: new Map() })
+  assert.equal(unfolded.messages[1].pinLevel, 'permanent')
+  assert.equal(unfolded.messages[2].pinLevel, 'recent')
+  assert.ok(unfolded.messages[2].sourceLabel.indexOf('近期重要') >= 0)
+
+  const entries = messageEntries({ derivedMessages: messages, folds: new Map() })
+  assert.equal(entries[1].pinLevel, 'permanent')
+  assert.equal(entries[2].pinLevel, 'recent')
 })
 
 test('token 按内容块计价：思考、回复、工具调用参数分开算', () => {

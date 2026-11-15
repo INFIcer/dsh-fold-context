@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  buildViewPayload,
   compositionPath,
   configPath,
   createCompositionHandler,
@@ -226,6 +227,7 @@ test('view 路由带上重要消息，以及系统提示词的版本与差异', 
     ...demoMessages,
     { id: 's2', role: 'system', content: [{ type: 'text', text: 'a\nB\nc' }], source: { kind: 'system' } },
     { id: 'p1', role: 'user', content: [{ type: 'text', text: '【重要·永不折叠】 结论' }], source: { kind: 'fold-pin', label: '结论' } },
+    { id: 'p2', role: 'user', content: [{ type: 'text', text: '【近期重要·第3轮·可能过时】 临时结论' }], source: { kind: 'fold-pin', label: '临时结论' } },
   ]
   const handler = createViewHandler({
     resolveSessionById: () => fakeSession('s3', messages),
@@ -244,14 +246,31 @@ test('view 路由带上重要消息，以及系统提示词的版本与差异', 
   assert.equal(systems[1].version, 2)
   assert.equal(systems[1].diff.add, 1)
   assert.equal(systems[1].diff.del, 1)
-  assert.deepEqual(body.pins.map((pin) => pin.label), ['结论'])
+  assert.deepEqual(body.pins.map((pin) => pin.label), ['结论', '临时结论'])
+  assert.deepEqual(body.pins.map((pin) => pin.level), ['permanent', 'recent'])
   assert.ok(body.pins[0].blocks.length > 0)
   // 重要消息要常显在轮卡片之外，所以正文随首包走；普通条目则等展开时才拉。
   const pinGroup = body.groups.find((group) => group.pins.length > 0)
   assert.ok(pinGroup, '重要消息应挂在一个分组上')
-  assert.deepEqual(pinGroup.pins.map((pin) => pin.pinLabel), ['结论'])
+  assert.deepEqual(pinGroup.pins.map((pin) => pin.pinLabel), ['结论', '临时结论'])
+  assert.deepEqual(pinGroup.pins.map((pin) => pin.pinLevel), ['permanent', 'recent'])
+  // 轮卡片的标签带级别，页面据此分色。
+  assert.deepEqual(pinGroup.pinLabels, [
+    { label: '结论', level: 'permanent' },
+    { label: '临时结论', level: 'recent' },
+  ])
   assert.ok(pinGroup.pins[0].blocks.length > 0)
   assert.equal(body.version, 5)
+})
+
+test('view 投影：旧版纯字符串 pin 标签按长期重要下发', () => {
+  const body = buildViewPayload({
+    sessionId: 's-legacy',
+    generatedAt: 1,
+    folded: { totals: {} },
+    turnGroups: [{ kind: 'turn', turn: 1, ordinal: 1, entries: [], pinLabels: ['旧结论'] }],
+  })
+  assert.deepEqual(body.groups[0].pinLabels, [{ label: '旧结论', level: 'permanent' }])
 })
 
 test('view 不再回上下文构成：构成图归 /fold-composition', () => {
