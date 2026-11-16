@@ -110,38 +110,63 @@ test('apply 注册对话顶栏 View 与插件页配置位', () => {
 })
 
 function demoComposition() {
-  const keys = ['system', 'systemHistory', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
-  const labels = ['系统提示', '旧版系统提示', '用户原话', '思考与回复', '工具调用与结果', '上下文注入', '折叠摘要', '重要消息']
+  const keys = ['system', 'systemHistory', 'toolDefs', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
+  const labels = ['系统提示', '旧版系统提示', '工具定义', '用户原话', '思考与回复', '工具调用与结果', '上下文注入', '折叠摘要', '重要消息']
   const bucket = (values) => {
     const out = {}
     keys.forEach((key, index) => { out[key] = values[index] || 0 })
     return out
   }
-  const folded = bucket([84381, 328999, 500, 12000, 4000, 1000, 3000, 300])
-  const unfolded = bucket([90000, 328999, 500, 900000, 700000, 8000, 0, 300])
+  const sumOf = (values) => keys.reduce((sum, key) => sum + (values[key] || 0), 0)
+  const foldedChars = bucket([84381, 328999, 0, 500, 12000, 4000, 1000, 3000, 300])
+  const unfoldedChars = bucket([90000, 328999, 0, 500, 900000, 700000, 8000, 0, 300])
+  // token 桶：与 chars 同一量级，工具定义两边相同（来自请求信封）。
+  const foldedTokens = bucket([21095, 0, 11196, 125, 3000, 1000, 250, 750, 75])
+  const unfoldedTokens = bucket([22500, 0, 11196, 125, 225000, 175000, 2000, 0, 75])
+  const firstFolded = bucket([21095, 0, 11196, 125, 3000, 1000, 250, 750, 0])
+  const firstUnfolded = bucket([22500, 0, 11196, 125, 225000, 175000, 2000, 0, 0])
+  const secondFolded = bucket([0, 0, 0, 0, 0, 0, 0, 0, 75])
   return {
     categories: keys.map((key, index) => ({ key, label: labels[index] })),
-    totals: { folded, unfolded, sum: { folded: 434180, unfolded: 2027799 } },
+    totals: {
+      folded: foldedChars,
+      unfolded: unfoldedChars,
+      sum: { folded: sumOf(foldedChars), unfolded: sumOf(unfoldedChars) },
+      tokens: {
+        folded: foldedTokens,
+        unfolded: unfoldedTokens,
+        sum: { folded: sumOf(foldedTokens), unfolded: sumOf(unfoldedTokens) },
+      },
+    },
     points: [
       {
         ordinal: 1,
         kind: 'turn',
         turn: 1,
         label: 'T1',
-        folded: bucket([84381, 0, 500, 12000, 4000, 1000, 3000, 0]),
-        unfolded: bucket([90000, 0, 500, 900000, 700000, 8000, 0, 0]),
+        folded: bucket([84381, 0, 0, 500, 12000, 4000, 1000, 3000, 0]),
+        unfolded: bucket([90000, 0, 0, 500, 900000, 700000, 8000, 0, 0]),
         totals: { folded: 110500, unfolded: 1698500 },
-        cumulative: { folded: bucket([84381, 0, 500, 12000, 4000, 1000, 3000, 0]), unfolded: bucket([90000, 0, 500, 900000, 700000, 8000, 0, 0]) },
+        tokens: { folded: firstFolded, unfolded: firstUnfolded },
+        tokensTotals: { folded: sumOf(firstFolded), unfolded: sumOf(firstUnfolded) },
+        cumulative: {
+          folded: bucket([84381, 0, 0, 500, 12000, 4000, 1000, 3000, 0]),
+          unfolded: bucket([90000, 0, 0, 500, 900000, 700000, 8000, 0, 0]),
+        },
+        cumulativeTokens: { folded: firstFolded, unfolded: firstUnfolded },
       },
       {
         ordinal: 2,
         kind: 'turn',
         turn: 2,
         label: 'T2',
-        folded: bucket([0, 0, 0, 300, 0, 0, 0, 300]),
-        unfolded: bucket([0, 0, 0, 300, 0, 0, 0, 300]),
-        totals: { folded: 600, unfolded: 600 },
-        cumulative: { folded, unfolded },
+        folded: bucket([0, 0, 0, 0, 0, 0, 0, 0, 300]),
+        unfolded: bucket([0, 0, 0, 0, 0, 0, 0, 0, 300]),
+        totals: { folded: 300, unfolded: 300 },
+        tokens: { folded: secondFolded, unfolded: secondFolded },
+        tokensTotals: { folded: sumOf(secondFolded), unfolded: sumOf(secondFolded) },
+        cumulative: { folded: foldedChars, unfolded: unfoldedChars },
+        cumulativeTokens: { folded: foldedTokens, unfolded: unfoldedTokens },
       },
     ],
   }
@@ -395,6 +420,55 @@ test('客户端不再用金额描述折叠收益', () => {
   const source = readFileSync(clientFile, 'utf8')
   assert.equal(source.includes("折叠收益', value: '+' + formatMoney"), false)
   assert.equal(source.includes('moneyNote'), false)
+})
+
+test('模型视角：顶部用 KPI 展示关键数字，不再铺大段说明', () => {
+  const payload = {
+    status: 'ready',
+    data: {
+      ok: true,
+      empty: false,
+      totals: {
+        messages: 294,
+        chars: 877024,
+        tokens: 222200,
+        checkpoints: 0,
+        pins: 0,
+        savedChars: 0,
+        saveRate: 0,
+        staleSystem: { count: 0, chars: 0 },
+      },
+      actual: {
+        promptTokens: 289892,
+        inputTokens: 657,
+        cacheReadTokens: 289235,
+        cacheWriteTokens: 0,
+        outputTokens: 1200,
+        turn: 8,
+        step: 1,
+        at: 1,
+      },
+      groups: [],
+      warns: [],
+      config: { enabled: false },
+      recallTotals: {},
+    },
+    error: '',
+    at: 1794800000000,
+  }
+  const { module } = loadClient({ states: [payload, 0, false, null, null] })
+  const json = JSON.stringify(module.__test.ModelView({ sessionId: 's1' }))
+  // 关键数字各占一张 KPI：消息、字数、估算、最近请求、省下。
+  assert.ok(json.includes('294 条'))
+  assert.ok(json.includes('877.0k 字'))
+  assert.ok(json.includes('222.2k token'))
+  assert.ok(json.includes('289.9k token'))
+  assert.ok(json.includes('新输入 657'))
+  assert.ok(json.includes('省下'))
+  // 旧的整段说明与 provider 长句不再占位。
+  assert.equal(json.includes('折叠后的会话历史'), false)
+  assert.equal(json.includes('provider 回报：最近一次请求的计费输入'), false)
+  assert.equal(json.includes('这里的估算与账单同向'), false)
 })
 
 test('模型视角：轮内正文按需拉，首包只带分组头与重要消息', () => {

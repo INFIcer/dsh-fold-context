@@ -322,6 +322,32 @@ test('composition 路由只回构成数据，格式与 view 的 composition 一�
   assert.equal('groups' in body, false)
 })
 
+test('composition 成本带上 store 里的实测用量：没有折叠记录也有账单', () => {
+  const messages = [
+    { id: 's1', role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system' } },
+    ...demoMessages,
+  ]
+  const records = [
+    { kind: 'usage', turn: 1, at: 1, steps: 1, input: 15, cacheRead: 30, cacheWrite: 0, output: 10 },
+  ]
+  const handler = createCompositionHandler({
+    resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', messages) : undefined),
+    makeStore: () => makeStore(records),
+    getConfig: () => ({}),
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq(compositionPath + '?session=s1'), res)
+  assert.equal(res.state.status, 200)
+  const body = JSON.parse(res.state.body)
+  // 关掉折叠后实测不能跟着消失：成本模型用 store 里的 usage 记录还原账单。
+  assert.equal(body.cost.totals.actualTurns, 1)
+  assert.equal(body.cost.totals.actualSteps, 1)
+  assert.equal(body.cost.totals.actualPromptTokens, 45)
+  assert.equal(body.cost.calibration.coveredTurns, 1)
+  assert.ok(body.cost.totals.foldedTokens > 0)
+})
+
 test('composition 路由缺参数 400、找不到会话 404、空历史给空构成', () => {
   const handler = createCompositionHandler({
     resolveSessionById: (id) => (id === 's2' ? fakeSession('s2', []) : undefined),

@@ -2198,14 +2198,15 @@ window.__ModuleLoader__.load({
     // token 口径与宿主 token-meter 的基本档一致：4 字符 ≈ 1 token。
     // 两种视角：折叠后 = 模型现在看到的；不折叠 = 假设一次都没折过。
 
-    // 旧版系统提示是会话历史里的副本，真正上行的只有最后一条：不参与堆叠与合计，
-    // 只在图例里留个数字当参考，否则构成图会被抬高好几倍。
-    var COMPOSITION_KEYS = ['system', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
+    // 旧版系统提示只作参考（服务端 categories 里标了 reference），不进堆叠与合计。
+    // 工具定义是请求信封的一部分，两种视角都有，单列一档（不随折叠变化）。
+    var COMPOSITION_KEYS = ['system', 'toolDefs', 'user', 'assistant', 'tools', 'inject', 'checkpoint', 'pin']
 
     var COMPOSITION_COLORS = {
       system: '#8b949e',
       // 旧版提示词已经没用，颜色压暗一档，和当前生效的那版拉开。
       systemHistory: '#64748b',
+      toolDefs: '#94a3b8',
       user: '#3b82f6',
       assistant: '#34d399',
       tools: '#f59e0b',
@@ -2218,22 +2219,26 @@ window.__ModuleLoader__.load({
       return COMPOSITION_COLORS[key] || '#8b949e'
     }
 
+    // 构成数据里 token 是现成的（宿主 token-meter 同口径）；这里不再按 4 字/token 折算。
     function compositionValue(point, view, mode, key) {
       if (!point) return 0
-      var bucket = mode === 'step' ? point[view] : point.cumulative ? point.cumulative[view] : null
-      var chars = bucket && typeof bucket[key] === 'number' ? bucket[key] : 0
-      return chars / 4
+      var bucket = mode === 'step'
+        ? point.tokens ? point.tokens[view] : null
+        : point.cumulativeTokens ? point.cumulativeTokens[view] : null
+      return bucket && typeof bucket[key] === 'number' ? bucket[key] : 0
     }
 
-    // 某一视角一块历史的总 token（七类相加）。画对照虚线用，独立于当前视图。
+    // 某一视角一块历史的 token 合计。画对照虚线用，独立于当前视图。
     function compositionTotal(point, viewName, mode) {
-      var bucket = !point ? null : mode === 'step' ? point[viewName] : point.cumulative ? point.cumulative[viewName] : null
+      var bucket = !point ? null : mode === 'step'
+        ? point.tokens ? point.tokens[viewName] : null
+        : point.cumulativeTokens ? point.cumulativeTokens[viewName] : null
       var sum = 0
       for (var k = 0; k < COMPOSITION_KEYS.length; k += 1) {
         var value = bucket && typeof bucket[COMPOSITION_KEYS[k]] === 'number' ? bucket[COMPOSITION_KEYS[k]] : 0
         sum += value
       }
-      return sum / 4
+      return sum
     }
 
     // 纵轴上限取整到 1/2/5 的整数倍，刻度不出现 3.7 这种数。
@@ -2349,8 +2354,9 @@ window.__ModuleLoader__.load({
       var sliceWidth = plotWidth / (count - 1)
       for (var hi = 0; hi < count; hi += 1) {
         var point = points[hi]
-        var fTokens = Math.round((point.totals && point.totals.folded ? point.totals.folded : 0) / 4)
-        var uTokens = Math.round((point.totals && point.totals.unfolded ? point.totals.unfolded : 0) / 4)
+        var tokenTotals = point.tokensTotals || {}
+        var fTokens = typeof tokenTotals.folded === 'number' ? tokenTotals.folded : 0
+        var uTokens = typeof tokenTotals.unfolded === 'number' ? tokenTotals.unfolded : 0
         hover.push(h('rect', {
           key: 'h' + hi,
           x: xAt(hi) - sliceWidth / 2,
@@ -2363,9 +2369,11 @@ window.__ModuleLoader__.load({
       var labels = []
       var every = Math.max(1, Math.ceil(count / 8))
       for (var li = 0; li < count; li += 1) {
-        if (li % every !== 0 && li !== count - 1) continue
         var label = points[li].label || ''
         if (!label) continue
+        // 折叠/压缩/系统事件点无论落在哪一格都标出来：趋势上的台阶要能对上事件。
+        var isEvent = /^[CFPS]/.test(label)
+        if (!isEvent && li % every !== 0 && li !== count - 1) continue
         labels.push(h('text', { key: 'l' + li, x: xAt(li), y: height - 7, fontSize: 10, fill: 'currentColor', opacity: 0.55, textAnchor: 'middle' }, label))
       }
       return h('div', { ref: measured[0], style: { width: '100%' } },
@@ -2383,19 +2391,16 @@ window.__ModuleLoader__.load({
       var categories = Array.isArray(composition.categories) ? composition.categories : []
       var points = Array.isArray(composition.points) ? composition.points : []
       var totals = composition.totals || {}
-      var folded = totals.folded || {}
-      var unfolded = totals.unfolded || {}
-      var sum = totals.sum || {}
-      var foldedTotal = typeof sum.folded === 'number' ? sum.folded : 0
-      var unfoldedTotal = typeof sum.unfolded === 'number' ? sum.unfolded : 0
+      var tokenTotals = totals.tokens || {}
+      var folded = tokenTotals.folded || {}
+      var unfolded = tokenTotals.unfolded || {}
+      var tokenSum = tokenTotals.sum || {}
+      var foldedTotal = typeof tokenSum.folded === 'number' ? tokenSum.folded : 0
+      var unfoldedTotal = typeof tokenSum.unfolded === 'number' ? tokenSum.unfolded : 0
       var viewState = react.useState('folded')
       var modeState = react.useState('total')
       var view = viewState[0]
       var mode = modeState[0]
-
-      function tokensOf(chars) {
-        return Math.round((chars || 0) / 4)
-      }
 
       // 两条 bar 共用一条比例尺：以不折叠的总量为满格，折叠后按比例缩短。
       // 这样长度差本身就是省下的量，而不是两条各自铺满 100% 只比内部色块。
@@ -2408,7 +2413,7 @@ window.__ModuleLoader__.load({
             if (!(value > 0)) return null
             return h('div', {
               key: category.key,
-              title: category.label + ' ' + formatChars(value) + ' ≈ ' + formatTokens(tokensOf(value)) + ' token',
+              title: category.label + ' ' + formatTokens(value) + ' token',
               style: Object.assign({}, C.compSeg, {
                 width: (total > 0 ? 100 * value / total : 0) + '%',
                 background: compositionColor(category.key),
@@ -2417,7 +2422,7 @@ window.__ModuleLoader__.load({
           }))
         var trackProps = {
           style: Object.assign({}, C.compBar, { flex: '1 1 0' }),
-          title: label + '合计 ' + formatTokens(tokensOf(total)) + ' token（满格 = 不折叠总量）',
+          title: label + '合计 ' + formatTokens(total) + ' token（满格 = 不折叠总量）',
         }
         // 在不折叠那条上画一道竖线，标出「折叠后只保留到这里」的位置。
         var track = null
@@ -2433,7 +2438,7 @@ window.__ModuleLoader__.load({
         return h('div', { style: C.compLine },
           h('span', { style: C.compLineLabel }, label),
           track,
-          h('span', { style: C.compLineValue }, formatTokens(tokensOf(total)) + ' token')
+          h('span', { style: C.compLineValue }, formatTokens(total) + ' token')
         )
       }
 
@@ -2443,12 +2448,12 @@ window.__ModuleLoader__.load({
         return h('div', {
           key: category.key,
           style: C.compItem,
-          title: category.label + '：折叠后 ' + formatChars(f) + ' ≈ ' + formatTokens(tokensOf(f)) + ' token；不折叠 ' + formatChars(u) + ' ≈ ' + formatTokens(tokensOf(u)) + ' token',
+          title: category.label + '：折叠后 ' + formatTokens(f) + ' token；不折叠 ' + formatTokens(u) + ' token',
         },
           h('span', { style: Object.assign({}, C.dot, { background: compositionColor(category.key) }) }),
           h('span', { style: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, category.label),
-          h('span', { style: C.compCell }, formatTokens(tokensOf(f))),
-          h('span', { style: Object.assign({}, C.compCell, { opacity: 0.55 }) }, formatTokens(tokensOf(u)))
+          h('span', { style: C.compCell }, formatTokens(f)),
+          h('span', { style: Object.assign({}, C.compCell, { opacity: 0.55 }) }, formatTokens(u))
         )
       })
 
@@ -2465,9 +2470,9 @@ window.__ModuleLoader__.load({
           h('div', { style: C.sectionHead },
             h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' } },
               h('div', { style: C.sectionTitle }, '上下文构成'),
-              h('div', { style: C.sub }, '折叠后 ' + formatTokens(tokensOf(foldedTotal)) + ' token · 不折叠 ' + formatTokens(tokensOf(unfoldedTotal)) + ' · 省 ' + percent(saveRate))
+              h('div', { style: C.sub }, '折叠后 ' + formatTokens(foldedTotal) + ' token · 不折叠 ' + formatTokens(unfoldedTotal) + ' · 省 ' + percent(saveRate))
             ),
-            h('div', { style: C.sub }, '按用途分类；两条同比例尺，长度差就是省下的量（图例：折叠后 / 不折叠）。系统提示只算当前生效的那一版；旧版提示词单列在图例里，不计入合计。')
+            h('div', { style: C.sub }, '按用途分类；两条同比例尺，长度差就是省下的量（图例：折叠后 / 不折叠）。系统提示只算当前生效的那一版；工具定义两边相同。')
           ),
           barLine('折叠后', folded, foldedTotal, barScale, 0),
           barLine('不折叠', unfolded, unfoldedTotal, barScale, unfoldedTotal > 0 ? foldedTotal / unfoldedTotal : 0),
@@ -2906,7 +2911,7 @@ window.__ModuleLoader__.load({
 
       var data = payload.data
       var toolbar = h('div', { style: C.row },
-        h('div', { style: C.sub }, '模型实际收到的历史；点开一轮才读取正文。'),
+        h('div', { style: C.sub }, '点开一轮查看正文'),
         h('div', { style: { flex: 1 } }),
         h('label', { style: Object.assign({}, C.sub, { cursor: 'pointer' }) },
           h('input', { type: 'checkbox', checked: wide[0], onChange: function (event) { wide[1](event.target.checked) } }),
@@ -2921,10 +2926,8 @@ window.__ModuleLoader__.load({
       if (data.empty) return h('div', {}, toolbar, h('div', { style: C.notice }, '这个会话还没有派生消息（历史为空）。'))
       var totals = data.totals || {}
       var tokens = typeof totals.tokens === 'number' ? totals.tokens : 0
-      var stale = totals.staleSystem || null
-      var staleText = stale && stale.count > 0
-        ? '；另有 ' + stale.count + ' 条旧版系统提示（' + formatChars(stale.chars) + '）留在会话历史里但不会上行，已从合计里扣掉'
-        : ''
+      var actual = data.actual || null
+      var saved = typeof totals.savedChars === 'number' ? totals.savedChars : 0
       var recallTotals = data.recallTotals || {}
       var recallBits = []
       if (recallTotals.calls > 0) recallBits.push('召回调用 ' + recallTotals.calls + ' 次')
@@ -2934,24 +2937,50 @@ window.__ModuleLoader__.load({
           (recallTotals.parts > 0 ? '（分段一共取回 ' + recallTotals.parts + ' 段次）' : ''))
       }
       if (recallTotals.searched > 0) {
-        recallBits.push((recallTotals.searchedFolds || 0) + ' 张分段目录被检索 ' + recallTotals.searched + ' 段次（检索不返回原文）')
+        recallBits.push((recallTotals.searchedFolds || 0) + ' 张分段目录被检索 ' + recallTotals.searched + ' 段次')
       }
-      var recallText = recallBits.length > 0 ? '；模型视角里' + recallBits.join('、') : ''
-      var notice = h('div', { style: C.notice },
-        '折叠后的会话历史 ' + (totals.messages || 0) + ' 条消息、' + formatChars(totals.chars) + '，约 ' +
-        formatTokens(tokens) + ' token（4 字符/token，按块 +4）；折叠检查点 ' + (totals.checkpoints || 0) +
-        ' 条、重要消息 ' + (totals.pins || 0) + ' 条；相比不折叠省 ' + formatChars(totals.savedChars) +
-        '（' + percent(totals.saveRate) + '）' + staleText + recallText + '。'
+
+      // 顶部只留能扫读的数字；解释压成下面一两行，不再铺大段说明。
+      var kpis = h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px' } },
+        h(Kpi, { label: '消息', value: (totals.messages || 0) + ' 条', hint: '模型当前可见' }),
+        h(Kpi, { label: '字数', value: formatChars(totals.chars), hint: '' }),
+        h(Kpi, { label: '估算输入', value: formatTokens(tokens) + ' token', hint: '4 字符 ≈ 1 token' }),
+        h(Kpi, {
+          label: '最近请求',
+          value: actual ? formatTokens(actual.promptTokens) + ' token' : '—',
+          hint: actual
+            ? '新输入 ' + formatTokens(actual.inputTokens) + ' · 命中 ' + formatTokens(actual.cacheReadTokens) +
+              (actual.cacheWriteTokens > 0 ? ' · 写 ' + formatTokens(actual.cacheWriteTokens) : '')
+            : '本轮还没有模型调用',
+        }),
+        h(Kpi, {
+          label: '省下',
+          value: (saved < 0 ? '−' : '') + formatChars(Math.abs(saved)),
+          color: saved > 0 ? '#34d399' : (saved < 0 ? '#f87171' : 'inherit'),
+          hint: '相比不折叠 · ' + percent(totals.saveRate),
+        })
       )
-      var actual = data.actual || null
-      var gap = actual ? tokens > actual.promptTokens * 1.3 : false
-      var actualNote = actual
-        ? h('div', { style: { fontSize: '11px', lineHeight: '17px', color: gap ? '#fbbf24' : 'inherit', opacity: gap ? 1 : 0.7 } },
-            'provider 回报：最近一次请求的计费输入 ' + formatTokens(actual.promptTokens) + ' token（新输入 ' + formatTokens(actual.inputTokens) + ' + 缓存命中 ' + formatTokens(actual.cacheReadTokens) + ' + 写缓存 ' + formatTokens(actual.cacheWriteTokens) + '）。' +
-            (gap
-              ? '它明显少于上面的估算：还有请求期压缩在改写信史（例如 billion-context），上面的数字量的是会话历史，不是真正上行的内容。'
-              : '这里的估算与账单同向。'))
-        : h('div', { style: { fontSize: '11px', lineHeight: '17px', opacity: 0.5 } }, 'provider 回报要等本轮发生一次模型调用后才有。')
+
+      // 非零才出现的细节：检查点、重要消息、旧版系统提示、召回/检索。
+      var facts = []
+      if (totals.checkpoints > 0) facts.push('折叠检查点 ' + totals.checkpoints + ' 条')
+      if (totals.pins > 0) facts.push('重要消息 ' + totals.pins + ' 条')
+      if (recallBits.length > 0) facts.push(recallBits.join('、'))
+      var factsLine = facts.length > 0
+        ? h('div', { style: { fontSize: '11px', lineHeight: '17px', opacity: 0.6 } }, facts.join(' · '))
+        : null
+
+      // 估算与账单的差：只写一句，说明差额来自哪里；差得不大就不占位置。
+      var compareLine = null
+      if (actual) {
+        var diff = actual.promptTokens - tokens
+        if (Math.abs(diff) > Math.max(1000, actual.promptTokens * 0.05)) {
+          compareLine = h('div', { style: { fontSize: '11px', lineHeight: '17px', opacity: 0.55 } },
+            diff > 0
+              ? '估算只算消息正文，比账单少 ' + formatTokens(diff) + '（工具定义与分词差异）'
+              : '估算按 4 字符/token 折算，比账单多 ' + formatTokens(-diff))
+        }
+      }
       var warns = (data.warns || []).map(function (text, index) {
         return h('div', { key: 'w' + index, style: { fontSize: '11px', opacity: 0.65, lineHeight: '17px' } }, '· ' + text)
       })
@@ -2964,8 +2993,9 @@ window.__ModuleLoader__.load({
       }
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
         toolbar,
-        notice,
-        actualNote,
+        kpis,
+        factsLine,
+        compareLine,
         warns.length ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, warns) : null,
         groups.map(function (group, index) {
           return h(MemoTurnCard, {
@@ -3195,7 +3225,7 @@ window.__ModuleLoader__.load({
         }), h('div', { style: C.tabHint }, '参数在侧栏「插件」页'))
       )
       var offBanner = offState[0] === true
-        ? h('div', { style: C.notice }, '压缩已关闭：不折叠、不注入折叠说明、也不提供召回与固化工具。下方数字取自未压缩的会话，用来核对账单。')
+        ? h('div', { style: C.notice }, '压缩已关闭，以下数据取自未压缩的会话。')
         : null
       var body = tab === 'model'
         ? h(ModelView, { sessionId: sessionId, onMeta: reportMeta })

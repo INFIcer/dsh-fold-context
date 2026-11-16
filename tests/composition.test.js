@@ -119,7 +119,37 @@ test('系统提示只算最后一条非空的 system，旧版单列且不计入�
 
 test('没有分组时给出完整分类与空总量', () => {
   const result = buildComposition({ groups: [] })
-  assert.equal(result.categories.length, 8)
+  assert.equal(result.categories.length, 9)
   assert.equal(result.points.length, 0)
   assert.deepEqual(result.totals.sum, { folded: 0, unfolded: 0 })
+  assert.deepEqual(result.totals.tokens.sum, { folded: 0, unfolded: 0 })
+})
+
+test('token 桶按宿主 token-meter 口径：按块计价、一条消息只算一次角色开销', () => {
+  const groups = [
+    group({
+      ordinal: 1,
+      turn: 1,
+      entries: [
+        entry({ role: 'user', sourceKind: 'user', chars: 40, blocks: [{ kind: 'text', text: 'u'.repeat(40) }] }),
+        entry({
+          role: 'assistant',
+          sourceKind: 'model',
+          chars: 120,
+          blocks: [
+            { kind: 'think', text: 't'.repeat(40) },
+            { kind: 'reply', text: 'r'.repeat(40) },
+            { kind: 'call', name: 'read', text: '{"file_path":"a"}'.repeat(4) },
+          ],
+        }),
+      ],
+    }),
+  ]
+  const result = buildComposition({ groups })
+  // user 40 字 ≈ 18 token；assistant 三块 ≈ 54 token（工具调用单独落到 tools 档）。
+  assert.equal(Math.round(result.totals.tokens.sum.folded), 18 + 54)
+  assert.ok(result.totals.tokens.folded.tools > 0)
+  assert.ok(result.totals.tokens.folded.assistant > 0)
+  // 没有日志时间线时没有工具定义，工具定义档为 0。
+  assert.equal(result.totals.tokens.folded.toolDefs, 0)
 })
