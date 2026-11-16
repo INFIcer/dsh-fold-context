@@ -120,12 +120,27 @@ window.__ModuleLoader__.load({
     }
 
     var C = {
-      panel: { display: 'flex', flexDirection: 'column', gap: '14px', padding: '0 22px 32px', minHeight: '100%', boxSizing: 'border-box' },
+      // 折叠页按宿主的 composer overlay 契约挂载（根节点带 data-conversation-composer-overlay）：
+      // 宿主因此把 composer 改成浮在 View 上的浮层，并隐藏对话列两侧那两条拖宽把手。
+      // 不选这一档，把手会绝对定位在滚动容器之上压在页面上，一拖就改了对话列宽（轨迹页、
+      // 统计页是同一个契约）。代价是 View 要自己拥有滚动容器：高度锁在 .viewArea 里，
+      // 正文在页内滚；底部按 composer 的实时高度留白，最后一行才不会被浮层压住。
+      panel: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '14px',
+        height: '100%',
+        minHeight: 0,
+        overflowY: 'auto',
+        // 与宿主原来的滚动容器同口径：滚动条出现与否都不改内容盒宽度，避免横向跳动。
+        scrollbarGutter: 'stable',
+        padding: '0 22px calc(var(--dsh-composer-height, 152px) + 24px)',
+        boxSizing: 'border-box',
+      },
       row: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' },
       title: { fontSize: '15px', fontWeight: 600, lineHeight: '22px' },
       sub: { fontSize: '12px', opacity: 0.62, lineHeight: '18px' },
-      // 顶栏贴住视口上沿：横向用负边距吃掉面板留白，底色不透明才遮得住滑过去的正文。
-      // 宿主把对话内容放在 overflow:auto 的滚动容器里，这里只负责在容器内粘住，不改宿主的布局。
+      // 顶栏贴住本页滚动容器的上沿：横向用负边距吃掉面板留白，底色不透明才遮得住滑过去的正文。
       header: {
         position: 'sticky',
         top: 0,
@@ -229,6 +244,10 @@ window.__ModuleLoader__.load({
       toggleOn: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.5)', background: 'rgba(128,128,128,.18)', color: 'inherit', cursor: 'pointer', fontWeight: 600 },
       toggleOff: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.28)', background: 'transparent', color: 'inherit', cursor: 'pointer', opacity: 0.65 },
     }
+
+    // View 根节点：样式之外只挂宿主的 composer overlay 契约属性（见 C.panel 注释）。
+    // 属性值给空串，React 会渲染成 data-conversation-composer-overlay=""，宿主的 :has() 才认。
+    var PAGE_ROOT = { style: C.panel, 'data-conversation-composer-overlay': '' }
 
     var KIND_COLORS = {
       user: ['rgba(47,111,235,.10)', '#2f6feb'],
@@ -3202,7 +3221,7 @@ window.__ModuleLoader__.load({
         return function () { alive = false }
       }, [])
       if (!sessionId) {
-        return h('div', { style: C.panel }, h('div', { style: C.notice }, '切换到具体会话后，这里显示该会话的折叠情况。'))
+        return h('div', PAGE_ROOT, h('div', { style: C.notice }, '切换到具体会话后，这里显示该会话的折叠情况。'))
       }
       var tabs = [['ledger', '账本'], ['model', '模型视角']]
       var meta = metaState[0]
@@ -3230,7 +3249,7 @@ window.__ModuleLoader__.load({
       var body = tab === 'model'
         ? h(ModelView, { sessionId: sessionId, onMeta: reportMeta })
         : h(Ledger, { sessionId: sessionId, onMeta: reportMeta })
-      return h('div', { style: C.panel }, header, offBanner, body)
+      return h('div', PAGE_ROOT, header, offBanner, body)
     }
 
     function apply(ctx) {

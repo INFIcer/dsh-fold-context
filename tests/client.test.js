@@ -83,6 +83,26 @@ test('折叠页顶栏：粘性标题条、两个标签页，且不再有逐轮�
   assert.equal(json.includes('"刷新"'), false)
 })
 
+test('折叠页选任 composer 浮层：页面自己滚动，宿主据此隐藏两侧拖宽分割线', () => {
+  // 宿主的对话列两侧各有一条绝对定位的拖宽把手（10px、col-resize），压在 View 之上；
+  // 只有 View 根节点带 data-conversation-composer-overlay 时它才被 display:none 掉。
+  // 折叠页漏掉这个属性，页面上就还能拖着改列宽——轨迹页与统计页都靠这一档关掉交互。
+  const { module } = loadClient({
+    states: ['ledger', { text: '', error: '' }, false, { status: 'loading', data: null, error: '', at: 0 }],
+  })
+  const tree = module.__test.FoldStatsView({ sessionId: 's1' })
+  assert.equal(tree.props['data-conversation-composer-overlay'], '')
+  // 选了浮层，composer 不再占流：页面必须自己拥有滚动容器，并在底部留出 composer 的实时高度，
+  // 否则最后一屏内容会滚不到浮层上面。
+  assert.equal(tree.props.style.overflowY, 'auto')
+  assert.equal(tree.props.style.height, '100%')
+  assert.ok(tree.props.style.padding.includes('var(--dsh-composer-height'), tree.props.style.padding)
+  // 没有会话的兜底态同样挂这个根：只要这一页在，把手就不该活过来。
+  const empty = loadClient({ states: ['ledger', null, null] })
+  const notice = empty.module.__test.FoldStatsView({})
+  assert.equal(notice.props['data-conversation-composer-overlay'], '')
+})
+
 test('客户端 bundle 声明 id 与 slots 依赖', () => {
   const { definition, module } = loadClient()
   assert.equal(definition.id, 'dsh-fold-context')
