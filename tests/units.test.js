@@ -1307,6 +1307,25 @@ test('上次写到一半的末行不会把新记录接坏', () => {
   assert.equal(records[1].id, 'B')
 })
 
+test('外部进程补写的记录下次访问就能读到，不会被内存缓存挡掉', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-test-'))
+  const store = new FoldStore({ homeDir, sessionId: 'external' })
+  store.append({ kind: 'fold', id: 'f1', turn: 1, chars: 10, items: [] })
+  assert.equal(store.readAll().length, 1)
+  // 模拟 tools/usage-backfill.mjs：另一个进程直接往同一个文件追加一条记录。
+  appendFileSync(
+    store.filePath,
+    JSON.stringify({ kind: 'usage', turn: 1, steps: 2, input: 10, cacheRead: 90, output: 5 }) + '\n',
+  )
+  const records = store.readAll()
+  assert.equal(records.length, 2, '外部追加的记录要能读到')
+  assert.equal(records[1].kind, 'usage')
+  // 再 append 时先重读，不能把外部记录挤掉。
+  store.append({ kind: 'pin', id: 'P', text: 'x' })
+  assert.equal(store.readAll().length, 3)
+  assert.equal(store.pins().length, 1)
+})
+
 test('ConfigStore 写盘失败时抛错，不假装成功', () => {
   const base = mkdtempSync(join(tmpdir(), 'fold-test-'))
   const blocker = join(base, 'blocker')

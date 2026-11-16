@@ -142,7 +142,7 @@ export function developerNode(seq, text, kind = 'tool-registry') {
   }
 }
 
-export function assistantNode(seq, { reasoning = '', text = '', calls = [] } = {}) {
+export function assistantNode(seq, { reasoning = '', text = '', calls = [], usage } = {}) {
   const content = []
   if (reasoning) content.push({ type: 'reasoning', text: reasoning })
   if (text) content.push({ type: 'text', text })
@@ -155,6 +155,7 @@ export function assistantNode(seq, { reasoning = '', text = '', calls = [] } = {
     data: {
       turn: 1,
       step: 1,
+      ...(usage ? { usage } : {}),
       message: {
         id: 'a' + seq,
         role: 'assistant',

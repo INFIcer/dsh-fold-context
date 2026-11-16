@@ -254,8 +254,95 @@ test('配置里关掉总开关：不折叠、不注入提示段、也不注册�
   api.stop()
 })
 
-test('总开关翻转时提示段与工具跟着上下，不用重启', async () => {
+// 实测不能被折叠开关关掉：关掉总开关后，账本仍要能显示 provider 的真实账单。
+test('关掉总开关后仍按轮记下 provider 实测用量', async () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ enabled: false }), 'utf8')
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-usage-off')
+  session.seed([userNode(1, '开始', 'user')])
+  emit(ctx, session, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+  emit(ctx, session, { type: 'step/start', seq: 3, data: { turn: 1, step: 1 } })
+  emitSurface(ctx, session, assistantNode(4, {
+    text: '答',
+    usage: { inputTokens: 120, cacheReadTokens: 880, cacheWriteTokens: 0, outputTokens: 40 },
+  }))
+  emit(ctx, session, { type: 'step/end', seq: 5, data: { turn: 1, step: 1 } })
+  emit(ctx, session, { type: 'turn/end', seq: 6, data: { turn: 1, reason: { kind: 'stop' } } })
+  await tick()
+
+  assert.equal(checkpointOf(session), undefined, '关掉总开关后不折叠')
+  const usages = new FoldStore({ homeDir, sessionId: 'sess-usage-off' }).readAll()
+    .filter((record) => record.kind === 'usage')
+  assert.equal(usages.length, 1, '每轮一条实测记录，与折叠无关')
+  assert.equal(usages[0].turn, 1)
+  assert.equal(usages[0].steps, 1)
+  assert.equal(usages[0].input, 120)
+  assert.equal(usages[0].cacheRead, 880)
+  assert.equal(usages[0].output, 40)
+  api.stop()
+})
+
+test('turn-stopping 与 turn/end 都触发时，实测只记一条', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  writeFileSync(join(homeDir, 'fold-config.json'), JSON.stringify({ enabled: false }), 'utf8')
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-usage-once')
+  session.seed([userNode(1, '开始', 'user')])
+  emit(ctx, session, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+  emit(ctx, session, { type: 'step/start', seq: 3, data: { turn: 1, step: 1 } })
+  emitSurface(ctx, session, assistantNode(4, {
+    text: '答',
+    usage: { inputTokens: 20, cacheReadTokens: 180, cacheWriteTokens: 0, outputTokens: 8 },
+  }))
+  emit(ctx, session, { type: 'step/end', seq: 5, data: { turn: 1, step: 1 } })
+
+  ctx.emit('agent/turn-stopping', { agent: { session }, turn: 1 })
+  emit(ctx, session, { type: 'turn/end', seq: 6, data: { turn: 1, reason: { kind: 'stop' } } })
+  await tick()
+
+  const usages = new FoldStore({ homeDir, sessionId: 'sess-usage-once' }).readAll()
+    .filter((record) => record.kind === 'usage')
+  assert.equal(usages.length, 1, '同一轮的用量不能被两条路径各记一次')
+  assert.equal(usages[0].steps, 1)
+  assert.equal(usages[0].input + usages[0].cacheRead, 200)
+  api.stop()
+})
+
+test('开着折叠时实测记录与折叠记录分开落账，折叠记录仍带同一份用量', async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
+  const ctx = makeCtx()
+  const api = assemble(ctx, { homeDir, logFile: null })
+  const session = new FakeSession('sess-usage-on')
+  session.seed([userNode(1, '开始', 'user')])
+  emit(ctx, session, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+  emit(ctx, session, { type: 'step/start', seq: 3, data: { turn: 1, step: 1 } })
+  emitSurface(ctx, session, assistantNode(4, {
+    reasoning: '思'.repeat(800),
+    calls: [{ id: 'c1', name: 'grep' }],
+    usage: { inputTokens: 300, cacheReadTokens: 2700, cacheWriteTokens: 0, outputTokens: 120 },
+  }))
+  emitSurface(ctx, session, toolNode(5, 'c1', '果'.repeat(600)))
+  emit(ctx, session, { type: 'step/end', seq: 6, data: { turn: 1, step: 1 } })
+  emit(ctx, session, { type: 'turn/end', seq: 7, data: { turn: 1, reason: { kind: 'stop' } } })
+  await tick()
+
+  const records = new FoldStore({ homeDir, sessionId: 'sess-usage-on' }).readAll()
+  const folds = records.filter((record) => record.kind === 'fold')
+  assert.ok(folds.length > 0, '这一轮应当被折叠')
+  assert.deepEqual(folds[0].usage, { steps: 1, input: 300, cacheRead: 2700, cacheWrite: 0, output: 120 })
+  const usages = records.filter((record) => record.kind === 'usage')
+  assert.equal(usages.length, 1, '折叠轮也有一条独立的实测记录')
+  assert.deepEqual(
+    { steps: usages[0].steps, input: usages[0].input, cacheRead: usages[0].cacheRead, output: usages[0].output },
+    { steps: 1, input: 300, cacheRead: 2700, output: 120 },
+  )
+  api.stop()
+})
+
+test('总开关翻转时提示段与工具跟着上下，不用重启', async () => {  const homeDir = mkdtempSync(join(tmpdir(), 'fold-host-'))
   const ctx = makeCtx()
   const api = assemble(ctx, { homeDir, logFile: null })
   const session = new FakeSession('sess-toggle')

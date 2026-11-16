@@ -152,10 +152,33 @@ test('没折叠的短回合整段仍算新内容，不进命中前缀', () => {
   const row = cost.turns[1]
   // 本轮两步都要重发上一轮那 900 字（含首请求），以及本轮轮内原文 5000 字
   // （首次上行 + 平均半步重发）。命中率为 0 时全部按未命中计。
+  // 前缀按整段 4900 字算一次 token，不能拆成 4000 + 900 两段：tokenOf 每段各自 ceil+块开销，
+  // 拆开会让同一份历史凭空多一点 token（就是「没折叠却省出负数」的来源）。
   assert.equal(
     row.foldedTokens,
-    2 * estimateChars(4000) + 2 * estimateChars(900) + estimateChars(5000) * 1.5,
+    2 * estimateChars(4900) + estimateChars(5000) * 1.5,
   )
+})
+
+test('没有折叠时两种视角逐 token 相等，不会出现负的净省', () => {
+  // 关掉压缩（enabled=false）时每一轮都没折：折叠视角与不折叠视角量的是同一份历史，
+  // 净省必须正好是 0。早先前缀拆成 base + fresh 两段各自 tokenOf，块开销与 ceil 被算两次，
+  // 128 步的会话会多出几百 token，页面显示成「净省 -673 token」。
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, folded: false, steps: 7, chars: 12000, checkpointChars: 0, unfoldedChars: 12000, outputChars: 500 }),
+    turn({ turn: 2, folded: false, steps: 5, chars: 9000, checkpointChars: 0, unfoldedChars: 9000, outputChars: 300 }),
+    turn({ turn: 3, folded: false, steps: 3, chars: 4000, checkpointChars: 0, unfoldedChars: 4000, outputChars: 100 }),
+  ]
+  const cost = buildCost({ groups, folds: [], config: { cacheHitRate: 0.9 } })
+  assert.equal(cost.totals.netSavedTokens, 0)
+  assert.equal(cost.totals.savedRate, 0)
+  assert.equal(cost.totals.foldedHitTokens, cost.totals.unfoldedHitTokens)
+  assert.equal(cost.totals.foldedInputTokens, cost.totals.unfoldedInputTokens)
+  for (const row of cost.turns) {
+    assert.equal(row.foldedTokens, row.unfoldedTokens)
+    assert.equal(row.netSavedTokens, 0)
+  }
 })
 
 test('上一轮检查点的后续重发也计入折叠视角', () => {
@@ -168,10 +191,11 @@ test('上一轮检查点的后续重发也计入折叠视角', () => {
   const row = cost.turns[1]
   // 第 1 轮的检查点在第二轮的 3 步里都在：首次未命中 + 2 次按命中价重发；
   // 第 2 轮自己的原文 3000 字同样从生成那一步起重发。
+  // 前缀按整段 4400 字（系统 4000 + 第 1 轮留存的 400）算一次，再从命中档扣掉检查点那一次首次上行。
   assert.equal(row.freshTokens, estimateChars(400))
   assert.equal(
     row.foldedHitTokens,
-    3 * estimateChars(4000) + 2 * estimateChars(400) + estimateChars(3000),
+    3 * estimateChars(4400) + estimateChars(3000) - estimateChars(400),
   )
   assert.equal(row.foldedInputTokens, estimateChars(3000) + estimateChars(400))
 })
@@ -385,6 +409,40 @@ test('折叠视角的未命中按实测收口：有回报的轮次与账单一�
   assert.equal(cost.totals.foldedHitTokens, 2100)
   assert.equal(cost.totals.outputTokens, 300)
   assert.equal(cost.totals.foldedMoney, cost.totals.actualMoney)
+})
+
+test('usage 记录与折叠解耦：这一轮没折也拿得到实测并完成校准', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 3, chars: 1200, checkpointChars: 0, unfoldedChars: 1200, outputChars: 800 }),
+  ]
+  const usages = [{ kind: 'usage', turn: 1, at: 1, steps: 3, input: 900, cacheRead: 2100, cacheWrite: 0, output: 300 }]
+  const cost = buildCost({ groups, folds: [], usages, config: {} })
+  // 账本不依赖折叠记录：usage 记录本身就是 provider 回报。
+  assert.equal(cost.calibration.coveredTurns, 1)
+  assert.equal(cost.totals.actualTurns, 1)
+  assert.equal(cost.totals.actualSteps, 3)
+  assert.equal(cost.totals.actualPromptTokens, 3000)
+  assert.equal(cost.totals.actualOutputTokens, 300)
+  assert.equal(cost.measuredHitRate, 0.7)
+  // 折叠视角就是实测那次运行：总量与未命中按实测收口。
+  assert.equal(cost.totals.foldedTokens, 3000)
+  assert.equal(cost.totals.foldedInputTokens, 900)
+  assert.equal(cost.totals.foldedMoney, cost.totals.actualMoney)
+})
+
+test('同一轮的多条 usage 记录相加，折叠记录的用量只兜底不重复计', () => {
+  const groups = [turn({ turn: 1, steps: 2, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 })]
+  const folds = [{ id: 'f1', turn: 1, usage: { steps: 2, input: 100, cacheRead: 900, cacheWrite: 0, output: 50 } }]
+  const usages = [
+    { kind: 'usage', turn: 1, steps: 1, input: 40, cacheRead: 400, cacheWrite: 0, output: 20 },
+    { kind: 'usage', turn: 1, steps: 1, input: 60, cacheRead: 500, cacheWrite: 0, output: 30 },
+  ]
+  const cost = buildCost({ groups, folds, usages, config: {} })
+  // 轮内 steering 把同一轮关两次：两条记录是两段增量，相加才是整轮。
+  assert.equal(cost.totals.actualSteps, 2)
+  assert.equal(cost.totals.actualPromptTokens, 1000)
+  assert.equal(cost.totals.actualOutputTokens, 50)
 })
 
 test('校准系数被钳制在安全区间', () => {
