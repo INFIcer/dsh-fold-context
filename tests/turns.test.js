@@ -114,6 +114,40 @@ test('系统提示词按出现时间单独成块，绝不进任何一轮', () =>
   assert.deepEqual(groups[1].entries.map((item) => item.role), ['user', 'assistant'])
 })
 
+test('会话开头的运行期通知并进第一轮，不单开一个空轮', () => {
+  const groups = buildTurnGroups({
+    entries: [
+      entry({ role: 'system', chars: 100, text: '系统' }),
+      entry({ role: 'user', sourceKind: 'runtime-context', text: '通知', chars: 2 }),
+      userEntry('第一句'),
+      assistantEntry('答一句'),
+      userEntry('第二句'),
+      assistantEntry('答二句'),
+    ],
+  })
+  // 通知不是用户开的轮：单开会多出一个没有回复的空轮，把后续轮次号整体推后一位。
+  assert.deepEqual(groups.map((group) => group.kind), ['system', 'turn', 'turn'])
+  const turnGroups = groups.filter((group) => group.kind === 'turn')
+  assert.deepEqual(turnGroups.map((group) => group.turn), [1, 2])
+  assert.equal(turnGroups[0].chars, 2 + 3 + 3)
+  assert.equal(turnGroups[0].steps, 1)
+})
+
+test('fork 种子里的折叠检查点仍单独成组：轮号从检查点续下去', () => {
+  const groups = buildTurnGroups({
+    entries: [
+      entry({ role: 'system', chars: 100, text: '系统' }),
+      checkpointEntry({ foldId: 'f5', noteChars: 30, turn: 5, items: [] }),
+      userEntry('继续'),
+      assistantEntry('答'),
+    ],
+  })
+  const turnGroups = groups.filter((group) => group.kind === 'turn')
+  assert.equal(turnGroups.length, 2)
+  assert.equal(turnGroups[0].turn, 5)
+  assert.equal(turnGroups[1].turn, 6)
+})
+
 test('轮中出现的系统提示词就地切开当前轮，不并入相邻轮', () => {
   const groups = buildTurnGroups({
     entries: [
