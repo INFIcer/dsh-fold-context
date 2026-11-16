@@ -2405,6 +2405,11 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 面积画当前视角、虚线画另一个视角；标题旁的说明跟着切换走，否则指反了。
+    function otherViewLabel(view) {
+      return view === 'unfolded' ? '虚线是折叠后视角' : '虚线是不折叠视角'
+    }
+
     function CompositionPanel(props) {
       var composition = props.composition || {}
       var categories = Array.isArray(composition.categories) ? composition.categories : []
@@ -2501,7 +2506,7 @@ window.__ModuleLoader__.load({
           h('div', { style: C.sectionHead },
             h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' } },
               h('div', { style: C.sectionTitle }, '上下文趋势'),
-              h('div', { style: C.sub }, '虚线是不折叠视角')
+              h('div', { style: C.sub }, otherViewLabel(view))
             ),
             h('div', { style: C.row },
               toggle('折叠后', view === 'folded', function () { viewState[1]('folded') }),
@@ -3282,6 +3287,7 @@ window.__ModuleLoader__.load({
       ModelView: ModelView,
       CompositionPanel: CompositionPanel,
       CompositionChart: CompositionChart,
+      otherViewLabel: otherViewLabel,
       TurnCard: TurnCard,
       entryKindOf: entryKindOf,
       costDriftNote: costDriftNote,

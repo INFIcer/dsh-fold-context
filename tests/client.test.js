@@ -209,6 +209,14 @@ test('构成面板、图表与重要消息行能渲染（冒烟）', () => {
   assert.ok(svg.children.length > 0)
   // 面积画当前视角，另一视角用虚线对照，两个视角能同框比较
   assert.ok(JSON.stringify(svg).includes('strokeDasharray'))
+  // 趋势标题的说明要跟着视角切换：虚线永远指「另一个」，指反了比不写还误导
+  assert.equal(components.otherViewLabel('folded'), '虚线是不折叠视角')
+  assert.equal(components.otherViewLabel('unfolded'), '虚线是折叠后视角')
+  // 默认视角是折叠后，说明写不折叠；切到不折叠时说明反过来指折叠后
+  assert.ok(JSON.stringify(panel).includes('虚线是不折叠视角'))
+  const unfoldedPanel = loadClient({ states: ['unfolded'] }).module.__test.CompositionPanel({ composition })
+  assert.ok(JSON.stringify(unfoldedPanel).includes('虚线是折叠后视角'))
+  assert.ok(!JSON.stringify(unfoldedPanel).includes('虚线是不折叠视角'))
   // 一轮里带一条重要消息：卡片本身与消息行都要能构造出来
   const turn = components.TurnCard({
     group: {
