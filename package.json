@@ -9,10 +9,12 @@
   "exports": {
     ".": "./lib/host.js",
     "./client": "./client/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "lib",
+    "locale",
     "client",
     "tools",
     "cordis.patch.yml",
