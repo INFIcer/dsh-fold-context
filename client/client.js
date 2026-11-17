@@ -2495,8 +2495,7 @@ window.__ModuleLoader__.load({
             h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' } },
               h('div', { style: C.sectionTitle }, '上下文构成'),
               h('div', { style: C.sub }, '折叠后 ' + formatTokens(foldedTotal) + ' token · 不折叠 ' + formatTokens(unfoldedTotal) + ' · 省 ' + percent(saveRate))
-            ),
-            h('div', { style: C.sub }, '按用途分类；两条同比例尺，长度差就是省下的量（图例：折叠后 / 不折叠）。系统提示只算当前生效的那一版；工具定义两边相同。')
+            )
           ),
           barLine('折叠后', folded, foldedTotal, barScale, 0),
           barLine('不折叠', unfolded, unfoldedTotal, barScale, unfoldedTotal > 0 ? foldedTotal / unfoldedTotal : 0),
