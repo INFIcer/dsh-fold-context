@@ -620,8 +620,8 @@ window.__ModuleLoader__.load({
       // 头部四张卡用 token：这份历史现在多大、折叠省了多少，都是 token 的事。
       // 金额只回答「这批 token 按当前单价折算是多少」，放在下面的表里当参考。
       var kpis = h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' } },
-        h(Kpi, { label: '折叠后上下文', value: formatTokens(totals.foldedTokens || 0) + ' token', color: '#34d399', hint: '按当前历史重放 ' + (totals.turns || 0) + ' 轮 / ' + (totals.steps || 0) + ' 步请求' }),
-        h(Kpi, { label: '不折叠上下文', value: formatTokens(totals.unfoldedTokens || 0) + ' token', color: '#f87171', hint: '原文一直留在上下文里' }),
+        h(Kpi, { label: '折叠后累计', value: formatTokens(totals.foldedTokens || 0) + ' token', color: '#34d399', hint: '按整段历史重放 ' + (totals.turns || 0) + ' 轮 / ' + (totals.steps || 0) + ' 步请求；已被压缩卷走的轮次也算在内' }),
+        h(Kpi, { label: '不折叠累计', value: formatTokens(totals.unfoldedTokens || 0) + ' token', color: '#f87171', hint: '假设原文一直留在上下文里，压缩掉的轮次同样按当时的体积重放' }),
         h(Kpi, { label: '净省', value: (saved >= 0 ? '+' : '') + formatTokens(saved) + ' token', color: saved >= 0 ? '#34d399' : '#f87171', hint: '省 ' + percent(totals.savedRate || 0) }),
         h(Kpi, { label: '实测最近一次请求', value: latest ? formatMoney(totals.latestMoney || 0) : '—', color: '#60a5fa', hint: latest ? '真实账单；' + formatTokens(latest.promptTokens) + ' token，有回报的 ' + (totals.actualTurns || 0) + ' 轮累计 ' + formatMoney(totals.actualMoney || 0) : '本进程还没有拿到 provider 回报' })
       )

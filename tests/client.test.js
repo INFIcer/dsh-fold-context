@@ -398,8 +398,8 @@ test('成本参考：头部按 token 计，金额只作折算', () => {
   const text = JSON.stringify(section)
   // 收益与成本用 token 报；金额只在按类别拆分的参考表里出现。
   assert.ok(text.includes('成本参考（按单价折算）'), text.slice(0, 300))
-  assert.ok(text.includes('折叠后上下文'))
-  assert.ok(text.includes('不折叠上下文'))
+  assert.ok(text.includes('折叠后累计'))
+  assert.ok(text.includes('不折叠累计'))
   assert.ok(text.includes('净省'))
   assert.equal(text.includes('折叠后账单'), false, '折叠后账单不再以金额为主指标')
   assert.equal(text.includes('净省金额'), false, '逐轮表不再报净省金额')
