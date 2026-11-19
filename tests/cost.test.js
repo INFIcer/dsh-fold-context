@@ -4,6 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { buildCost, normalizeLatest } from '../lib/cost.js'
+import { buildHistoryGroups } from '../lib/history.js'
 import { roundMoney } from '../lib/pricing.js'
 import { estimateChars } from '../lib/tokens.js'
 
@@ -496,6 +497,212 @@ test('重要消息的额外开销只算看得见的那几条，字数按整条�
   ]
   const cost = buildCost({ groups, folds: [], recalls: [], pins, config: { cacheHitRate: 1 } })
   assert.equal(cost.totals.pluginOverhead.pin, estimateChars(400))
+})
+
+
+// ---------- 峰谷计价 ----------
+
+const HOUR = 3600 * 1000
+// 2026-11-20 00:00 Asia/Hong_Kong（周五）。周六 = +24h，周一 = +72h。
+const HK_FRIDAY_MIDNIGHT = Date.UTC(2026, 10, 19, 16, 0, 0)
+
+function hkParts(at) {
+  const local = new Date(at + 8 * HOUR)
+  const month = String(local.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(local.getUTCDate()).padStart(2, '0')
+  return {
+    weekday: local.getUTCDay(),
+    minutes: local.getUTCHours() * 60 + local.getUTCMinutes(),
+    date: local.getUTCFullYear() + '-' + month + '-' + day,
+  }
+}
+
+// 假 fish-token：现行规则是北京时间周一至周五的 [09:00,12:00) 与 [14:00,18:00) 峰时，
+// 周末与 holidays 里的日期全天谷时。这里只是测试替身，插件本身不实现任何钟点/周末判断。
+function fakePeakAt(at, holidays) {
+  const part = hkParts(at)
+  const weekday = part.weekday >= 1 && part.weekday <= 5
+  const holiday = holidays instanceof Set ? holidays.has(part.date) : false
+  const inWindow = (part.minutes >= 9 * 60 && part.minutes < 12 * 60) ||
+    (part.minutes >= 14 * 60 && part.minutes < 18 * 60)
+  const peak = weekday && !holiday && inWindow
+  return {
+    ok: true,
+    period: peak ? 'peak' : 'offpeak',
+    peak,
+    multiplier: 2,
+    timezone: 'Asia/Hong_Kong',
+    now: at,
+    nextSwitchAt: null,
+    nextPeakAt: null,
+    nextOffPeakAt: null,
+  }
+}
+
+function peakService(extra, holidays) {
+  const fake = (at) => fakePeakAt(at, holidays)
+  return Object.assign({
+    enabled: true,
+    available: true,
+    fallback: false,
+    multiplier: 2,
+    pricingAt: fake,
+    now: fake(HK_FRIDAY_MIDNIGHT + 10 * HOUR),
+  }, extra)
+}
+
+function flatPeak(peak, extra) {
+  return peakService(Object.assign({
+    pricingAt: () => ({ ok: true, period: peak ? 'peak' : 'offpeak', peak, multiplier: 2, timezone: 'Asia/Hong_Kong' }),
+  }, extra))
+}
+
+test('峰时按设置倍率乘三档单价，溢价能单独拆出来', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, at: HK_FRIDAY_MIDNIGHT + 10 * HOUR, steps: 2, chars: 1200, checkpointChars: 200, unfoldedChars: 60000, outputChars: 800 }),
+  ]
+  const base = buildCost({ groups, config: { cacheHitRate: 0.9 } })
+  const atPeak = buildCost({ groups, config: { cacheHitRate: 0.9 }, peak: peakService({}) })
+  assert.equal(atPeak.peak.active, true)
+  assert.equal(atPeak.peak.fallback, false)
+  assert.equal(atPeak.peak.turns.peak, 1)
+  assert.equal(atPeak.turns[0].pricePoint.multiplier, 2)
+  assert.ok(Math.abs(atPeak.totals.foldedMoney - roundMoney(base.totals.foldedMoney * 2)) < 1e-9)
+  // 溢价 = 峰时价 − 谷时价；折叠后 / 不折叠 / 实测三个口径分开给。
+  assert.ok(Math.abs(atPeak.peak.premium.folded - base.totals.foldedMoney) < 1e-6)
+  assert.ok(Math.abs(atPeak.peak.premium.unfolded - base.totals.unfoldedMoney) < 1e-6)
+  // 分项金额也按峰时价：命中档 0.02 → 0.04。
+  assert.equal(atPeak.totals.money.folded.cacheHit, roundMoney(atPeak.totals.foldedHitTokens * 0.04 / 1e6))
+})
+
+test('谷时保持原价，不乘倍率也没有溢价', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    // 周五午休 12:30：现行规则里是谷时。
+    turn({ turn: 1, at: HK_FRIDAY_MIDNIGHT + 12.5 * HOUR, steps: 2, chars: 1200, checkpointChars: 200, unfoldedChars: 60000, outputChars: 800 }),
+  ]
+  const base = buildCost({ groups, config: { cacheHitRate: 0.9 } })
+  const offPeak = buildCost({ groups, config: { cacheHitRate: 0.9 }, peak: peakService({}) })
+  assert.equal(offPeak.peak.turns.offPeak, 1)
+  assert.equal(offPeak.turns[0].pricePoint.multiplier, 1)
+  assert.equal(offPeak.totals.foldedMoney, base.totals.foldedMoney)
+  assert.equal(offPeak.peak.premium.folded, 0)
+  assert.equal(offPeak.peak.premium.unfolded, 0)
+})
+
+test('跨午休与午后切换点按每条记录自己的时间戳判峰谷，不用「现在」一刀切', () => {
+  // 周五 11:45 峰 → 12:15 谷（午休）→ 13:45 谷 → 14:15 峰。
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, at: HK_FRIDAY_MIDNIGHT + 11.75 * HOUR, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+    turn({ turn: 2, at: HK_FRIDAY_MIDNIGHT + 12.25 * HOUR, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+    turn({ turn: 3, at: HK_FRIDAY_MIDNIGHT + 13.75 * HOUR, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+    turn({ turn: 4, at: HK_FRIDAY_MIDNIGHT + 14.25 * HOUR, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+  ]
+  const cost = buildCost({ groups, config: { cacheHitRate: 1 }, peak: peakService({}) })
+  assert.deepEqual(cost.turns.map((row) => row.pricePoint.multiplier), [2, 1, 1, 2])
+  assert.deepEqual(cost.peak.turns, { peak: 2, offPeak: 2, unknown: 0 })
+  assert.ok(cost.peak.premium.folded > 0)
+  // 换个「现在」不影响历史：当前时刻是谷时，11:45 与 14:15 那两轮仍旧按峰时算。
+  const later = buildCost({
+    groups,
+    config: { cacheHitRate: 1 },
+    peak: peakService({ now: fakePeakAt(HK_FRIDAY_MIDNIGHT + 19 * HOUR) }),
+  })
+  assert.deepEqual(later.turns.map((row) => row.pricePoint.multiplier), [2, 1, 1, 2])
+})
+
+test('跨午夜、周末与节假日都按服务判定：夜里、周末、节假日全天都是谷时', () => {
+  // 周五 23:50 谷 → 周六 10:00 谷（周末）→ 周一 10:00 峰 → 周二 10:00 谷（模拟法定节假日）。
+  const holidays = new Set(['2026-11-24'])
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, at: HK_FRIDAY_MIDNIGHT + 23.833 * HOUR, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+    turn({ turn: 2, at: HK_FRIDAY_MIDNIGHT + 34 * HOUR, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+    turn({ turn: 3, at: HK_FRIDAY_MIDNIGHT + 82 * HOUR, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+    turn({ turn: 4, at: HK_FRIDAY_MIDNIGHT + 106 * HOUR, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+  ]
+  const cost = buildCost({ groups, config: { cacheHitRate: 1 }, peak: peakService({}, holidays) })
+  assert.deepEqual(cost.turns.map((row) => row.pricePoint.multiplier), [1, 1, 2, 1])
+  assert.deepEqual(cost.peak.turns, { peak: 1, offPeak: 3, unknown: 0 })
+  assert.ok(cost.peak.premium.folded > 0)
+})
+
+test('全量历史把 turn/start 的时间带到分组上，成本按各自时刻判峰谷', () => {
+  const at = HK_FRIDAY_MIDNIGHT + 10 * HOUR
+  const groups = buildHistoryGroups({
+    events: [
+      { type: 'turn/start', seq: 1, time: at, data: { turn: 1 } },
+      { type: 'system/message', seq: 2, data: { message: { role: 'system', content: [{ type: 'text', text: 'S'.repeat(40) }] } } },
+      { type: 'user/message', seq: 3, data: { role: 'user', content: [{ type: 'text', text: '上午的问题' }] } },
+      { type: 'step/start', seq: 4, data: { turn: 1 } },
+    ],
+    folds: new Map(),
+  })
+  assert.equal(groups[0].at, at)
+  const cost = buildCost({ groups, config: { cacheHitRate: 1 }, peak: peakService({}) })
+  assert.equal(cost.turns[0].at, at)
+  assert.equal(cost.turns[0].pricePoint.peak, true)
+})
+
+test('倍率=1 等于不区分峰谷：仍判峰时，但金额与谷时一致', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, at: HK_FRIDAY_MIDNIGHT + 10 * HOUR, steps: 2, chars: 1200, checkpointChars: 200, unfoldedChars: 60000, outputChars: 800 }),
+  ]
+  const base = buildCost({ groups, config: { cacheHitRate: 0.9 } })
+  const noEffect = buildCost({
+    groups,
+    config: { cacheHitRate: 0.9, peakMultiplier: 1 },
+    // peak.js 已把「用户改过设置」解析成最终倍率；成本模型只认这个值。
+    peak: flatPeak(true, { multiplier: 1 }),
+  })
+  assert.equal(noEffect.peak.multiplier, 1)
+  assert.equal(noEffect.peak.turns.peak, 1, '时段仍是峰时')
+  assert.equal(noEffect.peak.premium.folded, 0)
+  assert.equal(noEffect.peak.premium.unfolded, 0)
+  assert.equal(noEffect.totals.foldedMoney, base.totals.foldedMoney)
+})
+
+test('服务缺失时按峰值倍率保守估算，并标成回退', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, steps: 2, chars: 1200, checkpointChars: 200, unfoldedChars: 60000, outputChars: 800 }),
+  ]
+  const base = buildCost({ groups, config: { cacheHitRate: 0.9 } })
+  const fallback = buildCost({
+    groups,
+    config: { cacheHitRate: 0.9 },
+    peak: { enabled: true, available: false, fallback: true, multiplier: 2, pricingAt: null, now: null },
+  })
+  assert.equal(fallback.peak.available, false)
+  assert.equal(fallback.peak.fallback, true)
+  assert.equal(fallback.peak.active, false)
+  assert.equal(fallback.peak.applied, true)
+  assert.equal(fallback.peak.turns.unknown, 1)
+  assert.equal(fallback.turns[0].pricePoint.multiplier, 2)
+  assert.ok(Math.abs(fallback.totals.foldedMoney - roundMoney(base.totals.foldedMoney * 2)) < 1e-9)
+  // 纯函数直接调用（没传 peak）保持原来的谷时价：回退只在调用方明确说「拿不到服务」时启用。
+  assert.equal(buildCost({ groups, config: { cacheHitRate: 0.9 } }).totals.foldedMoney, base.totals.foldedMoney)
+})
+
+test('逐条判定抛错或记录没有时间戳时按峰时保守估算，并计入未知', () => {
+  const groups = [
+    { kind: 'system', chars: 4000 },
+    turn({ turn: 1, at: HK_FRIDAY_MIDNIGHT, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+    turn({ turn: 2, steps: 1, chars: 1000, checkpointChars: 0, unfoldedChars: 1000 }),
+  ]
+  const flaky = peakService({
+    pricingAt(at) {
+      if (at === HK_FRIDAY_MIDNIGHT) throw new Error('upstream down')
+      return fakePeakAt(at)
+    },
+  })
+  const cost = buildCost({ groups, config: { cacheHitRate: 1 }, peak: flaky })
+  assert.equal(cost.peak.degraded, true)
+  assert.equal(cost.peak.turns.unknown, 2)
+  assert.deepEqual(cost.turns.map((row) => row.pricePoint.multiplier), [2, 2])
 })
 
 test('上一轮检查点与目录分开报，都不漏进额外开销', () => {

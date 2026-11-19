@@ -79,6 +79,70 @@ window.__ModuleLoader__.load({
       return '命中 ¥' + prices.cacheHit + ' / 未命中 ¥' + prices.input + ' / 输出 ¥' + prices.output + ' 每百万 token'
     }
 
+    // 切换时间按服务给的时区显示：账本可能在别的时区打开，不能用浏览器本地钟点冒充。
+    function peakClock(at, timezone) {
+      if (typeof at !== 'number' || !isFinite(at) || at <= 0) return ''
+      try {
+        if (timezone) {
+          return new Intl.DateTimeFormat('zh-CN', {
+            timeZone: timezone,
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          }).format(new Date(at))
+        }
+        var d = new Date(at)
+        var pad = function (v) { return v < 10 ? '0' + v : String(v) }
+        return pad(d.getHours()) + ':' + pad(d.getMinutes())
+      } catch {
+        return ''
+      }
+    }
+
+    // 谷时的原因只作一句注释：周末 / 节假日 / 午休 / 夜间，让人知道为什么这个钟点是谷时。
+    function peakReasonText(reason) {
+      switch (reason) {
+        case 'holiday': return '节假日'
+        case 'weekend': return '周末'
+        case 'lunch':
+        case 'lunch-break': return '午休'
+        case 'night':
+        case 'before-work': return '夜间'
+        case 'break':
+        case 'offpeak': return '时段外'
+        // calendar-missing 由下面「节假日历已过期」那一句单独说明，这里不再重复。
+        default: return ''
+      }
+    }
+
+    // 成本口径一行：当前峰/谷、倍率、下次切换、峰时溢价。服务拿不到时按峰值倍率保守估算，
+    // 必须写明是回退，否则读者会把估算当查询结果。
+    function peakLine(peak) {
+      var p = peak || {}
+      var multiplier = typeof p.multiplier === 'number' && isFinite(p.multiplier) ? p.multiplier : 2
+      if (p.enabled === false) return '按峰谷计价已关闭：全部按谷时单价'
+      if (p.fallback === true || p.applied !== true) {
+        var estimate = '未接入计价服务，按峰值倍率 ×' + multiplier + ' 估算（保守）'
+        var fallbackPremium = p.premium && typeof p.premium.folded === 'number' ? p.premium.folded : 0
+        if (fallbackPremium > 0) estimate += ' · 峰时溢价 ' + formatMoney(fallbackPremium)
+        return estimate
+      }
+      var reasonText = peakReasonText(p.reason)
+      var text = (p.peak === true ? '当前峰时' : '当前谷时') +
+        (reasonText ? '（' + reasonText + '）' : '') +
+        (p.peak === true
+          ? ' · 当前倍率 ×' + multiplier
+          : ' · 当前倍率 ×1（峰时 ×' + multiplier + '）')
+      var switchAt = peakClock(p.nextSwitchAt, p.timezone)
+      if (switchAt) text += ' · ' + switchAt + ' 转' + (p.peak === true ? '谷时' : '峰时')
+      text += ' · 峰时溢价 ' + formatMoney(p.premium && p.premium.folded)
+      var unknown = p.turns && typeof p.turns.unknown === 'number' ? p.turns.unknown : 0
+      if (unknown > 0) text += '（' + unknown + ' 轮没有时段数据，按峰时算）'
+      else if (p.degraded === true) text += '（部分记录判不出时段，按峰时算）'
+      if (p.calendar && p.calendar.covered === false) text += '（节假日历已过期，按星期与钟点估算）'
+      return text
+    }
+
     function percent(rate) {
       var value = typeof rate === 'number' && isFinite(rate) ? rate : 0
       return (value * 100).toFixed(1) + '%'
@@ -611,6 +675,17 @@ window.__ModuleLoader__.load({
       var latest = cost.latest || null
       var prices = cost.prices || { cacheHit: 0.02, input: 1, output: 4 }
       var rows = Array.isArray(cost.turns) ? cost.turns : []
+      // 峰谷：服务端已经把每条记录的单价折进 totals.money；旧载荷没有这份时才退回
+      // 「token × 当前价」的本地折算，页面不会因为一次升级后的旧 JSON 空白。
+      var peak = cost.peak || null
+      var money = totals.money && typeof totals.money === 'object' ? totals.money : null
+      var priceHeader = peak && peak.applied === true ? '谷时单价（¥ / M）' : '单价（¥ / M）'
+      function moneyOfPart(kind, key, tokens, price) {
+        var bucket = money && money[kind] && typeof money[kind] === 'object' ? money[kind] : null
+        var field = key === 'hit' ? 'cacheHit' : key
+        if (bucket && typeof bucket[field] === 'number' && isFinite(bucket[field])) return bucket[field]
+        return moneyOfTokens(tokens, price)
+      }
       // 三档分开结算：各自乘自己的单价，加起来才是这一份历史的账单。
       // 输出在两种视角里是同一句回复，所以两边一样、净省为 0；列出来是为了把账凑齐。
       var parts = [
@@ -621,11 +696,13 @@ window.__ModuleLoader__.load({
       var foldedMoney = 0
       var unfoldedMoney = 0
       for (var pi = 0; pi < parts.length; pi += 1) {
-        parts[pi].foldedMoney = moneyOfTokens(parts[pi].folded, parts[pi].price)
-        parts[pi].unfoldedMoney = moneyOfTokens(parts[pi].unfolded, parts[pi].price)
+        parts[pi].foldedMoney = moneyOfPart('folded', parts[pi].key, parts[pi].folded, parts[pi].price)
+        parts[pi].unfoldedMoney = moneyOfPart('unfolded', parts[pi].key, parts[pi].unfolded, parts[pi].price)
         foldedMoney += parts[pi].foldedMoney
         unfoldedMoney += parts[pi].unfoldedMoney
       }
+      if (money && money.folded && typeof money.folded.total === 'number') foldedMoney = money.folded.total
+      if (money && money.unfolded && typeof money.unfolded.total === 'number') unfoldedMoney = money.unfolded.total
       var savedMoney = unfoldedMoney - foldedMoney
       var saved = totals.netSavedTokens || 0
       // 头部四张卡用 token：这份历史现在多大、折叠省了多少，都是 token 的事。
@@ -670,14 +747,15 @@ window.__ModuleLoader__.load({
       ]
       var actualMoney = 0
       for (var ai = 0; ai < actualParts.length; ai += 1) {
-        actualParts[ai].money = moneyOfTokens(actualParts[ai].tokens, actualParts[ai].price)
+        actualParts[ai].money = moneyOfPart('actual', actualParts[ai].key, actualParts[ai].tokens, actualParts[ai].price)
         actualMoney += actualParts[ai].money
       }
+      if (money && money.actual && typeof money.actual.total === 'number') actualMoney = money.actual.total
       var actualTable = (totals.actualTurns || 0) > 0
         ? h('div', {},
             h('div', { style: Object.assign({}, C.sub, { margin: '10px 0 4px' }) }, '实测账单（provider 回报，' + (totals.actualTurns || 0) + ' 轮 / ' + (totals.actualSteps || 0) + ' 步）'),
             h('table', { style: C.table },
-              h('thead', {}, headCells(['类别', 'token', '单价（¥ / M）', '金额'])),
+              h('thead', {}, headCells(['类别', 'token', priceHeader, '金额'])),
               h('tbody', {}, actualParts.map(function (part) {
                 return h('tr', { key: 'a' + part.key },
                   h('td', { style: C.td }, part.label),
@@ -724,13 +802,16 @@ window.__ModuleLoader__.load({
       return h('div', { style: C.section },
         h('div', { style: C.sectionHead },
           h('div', { style: C.sectionTitle }, '成本参考（按单价折算）'),
-          h('div', { style: C.sub }, priceLine(prices) + ' · 折叠收益以 token 计，金额只是同一批 token 的折算参考')
+          h('div', { style: C.sub }, priceLine(prices) + (peak && peak.applied === true ? '（谷时价，峰时乘倍率）' : '') + ' · 折叠收益以 token 计，金额只是同一批 token 的折算参考')
         ),
+        h('div', { style: Object.assign({}, C.sub, { margin: '-4px 0 8px' }) }, peakLine(peak)),
         kpis,
         // 六条口径说明每年看两次：收进折叠行，账本主体只剩数字与表。
         h('details', { style: C.notesBox },
           h('summary', { style: C.notesSummary }, '口径与校准说明：金额不是收益、未命中怎么算、估算与实测差多少'),
-          h('div', { style: C.noteLine }, '金额不是收益：同一批 token 换成高峰价就翻倍，真实请求还会被缓存与请求期压缩器改写。这里只回答「这些 token 按当前单价折算是多少」；「实测」那一栏才是 provider 回报的真实计费。'),
+          h('div', { style: C.noteLine }, '金额不是收益：同一批 token 换个时段单价就变，真实请求还会被缓存与请求期压缩器改写。这里只回答「这些 token 按记录的时段与单价折算是多少」；「实测」那一栏才是 provider 回报的真实计费。'),
+          h('div', { style: C.noteLine }, '峰谷按每条记录自己的时间戳判，不是按「现在」一刀切；峰时三档单价乘峰值倍率，谷时保持原价。总额里的「峰时溢价」就是这部分多出来的钱。'),
+          h('div', { style: C.noteLine }, '时段与下次切换时间来自计价服务；拿不到时按峰值倍率保守估算，并在上方标注为回退。跨午夜时各条记录仍按各自时刻算。'),
           h('div', { style: C.noteLine }, '三档分别结算；输出在两种视角里是同一句回复，净省为 0。'),
           h('div', { style: C.noteLine }, calibrationNote(cost)),
           h('div', { style: C.noteLine }, costDriftNote(cost.drift)),
@@ -741,7 +822,7 @@ window.__ModuleLoader__.load({
         h('div', { style: Object.assign({}, C.sub, { margin: '10px 0 4px' }) }, '按类别拆分（估算）'),
         h('div', { style: { maxHeight: '260px', overflowY: 'auto' } },
           h('table', { style: C.table },
-            h('thead', {}, headCells(['类别', '折叠后 token', '不折叠 token', '单价（¥ / M）', '折叠后', '不折叠', '净省'])),
+            h('thead', {}, headCells(['类别', '折叠后 token', '不折叠 token', priceHeader, '折叠后', '不折叠', '净省'])),
             h('tbody', {}, breakdownRows)
           )
         ),
@@ -3394,7 +3475,7 @@ window.__ModuleLoader__.load({
         }
         return h('div', { key: field.key, style: C.field },
           h('div', { style: C.fieldTop },
-            h('label', { style: C.fieldKey }, field.key),
+            h('label', { style: C.fieldKey }, field.label || field.key),
             h('span', { style: C.fieldRange }, fieldRange(field))
           ),
           h('div', { style: C.fieldDesc }, field.description || ''),
@@ -3514,6 +3595,8 @@ window.__ModuleLoader__.load({
       costDriftNote: costDriftNote,
       calibrationNote: calibrationNote,
       missNote: missNote,
+      peakLine: peakLine,
+      peakClock: peakClock,
       CostSection: CostSection,
       ledgerKpis: ledgerKpis,
       formatMoney: formatMoney,

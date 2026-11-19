@@ -12,6 +12,7 @@ import { foldTurn, publishPin } from '../lib/commit.js'
 import { FoldStore, safeFileName } from '../lib/store.js'
 import {
   ConfigStore,
+  configFields,
   defaultConfig,
   defaultRecallReminderText,
   normalizeConfig,
@@ -21,7 +22,15 @@ import {
 import { promptSection, systemPromptText } from '../lib/prompt.js'
 import { createPinMessage, pinBodyOf, pinCharsOf, resolvePins } from '../lib/pins.js'
 import { pinPrefix, recentPinPrefix, recentPinSuffix } from '../lib/constants.js'
-import { moneyOf, pricesOf, roundMoney, yuanOf } from '../lib/pricing.js'
+import {
+  moneyOf,
+  peakMultiplierOf,
+  pricesAtMultiplier,
+  pricesOf,
+  rawMoneyOf,
+  roundMoney,
+  yuanOf,
+} from '../lib/pricing.js'
 import {
   foldParts,
   matchFoldPartNumbers,
@@ -731,6 +740,69 @@ test('pricing 用默认价兜底，金额按百万 token 折算', () => {
   // 召回与摘要的首次上行是新内容（未命中价），一个均价会同时高估一方、低估另一方。
   assert.equal(yuanOf(1000000, prices.cacheHit), 0.02)
   assert.equal(yuanOf(1000000, prices.input), 1)
+})
+
+test('峰谷配置：默认按峰时倍率 2 计价，旧配置缺键回落默认', () => {
+  const base = defaultConfig()
+  assert.equal(base.peakPricing, true)
+  assert.equal(base.peakMultiplier, 2)
+  // 旧文件没有这两个键时不会被读成 undefined：默认值补上，账本继续按新口径算。
+  const old = normalizeConfig({ maxNoteTokens: 400 }, defaultConfig())
+  assert.equal(old.maxNoteTokens, 400)
+  assert.equal(old.peakPricing, true)
+  assert.equal(old.peakMultiplier, 2)
+  // 设置页字段表要能拿到中文名与范围。
+  const peakFields = configFields().filter((field) => field.key === 'peakPricing' || field.key === 'peakMultiplier')
+  assert.equal(peakFields.length, 2)
+  assert.equal(peakFields[0].label, '按峰谷计价')
+  assert.equal(peakFields[1].label, '峰值倍率')
+  assert.equal(peakFields[1].min, 1)
+  assert.equal(peakFields[1].max, 10)
+})
+
+test('旧配置文件没有峰谷键时回落到默认值，不改动已有键', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'fold-peak-'))
+  const file = join(homeDir, 'fold-config.json')
+  writeFileSync(file, JSON.stringify({ maxNoteTokens: 400, enabled: false }), 'utf8')
+  const config = new ConfigStore({ homeDir, log: silent }).load({})
+  assert.equal(config.maxNoteTokens, 400, '旧键照旧生效')
+  assert.equal(config.enabled, false)
+  assert.equal(config.peakPricing, true, '缺的新键用默认值')
+  assert.equal(config.peakMultiplier, 2)
+})
+
+test('峰谷配置的钳制与严格校验', () => {
+  assert.equal(normalizeConfig({ peakMultiplier: 0 }).peakMultiplier, 1)
+  assert.equal(normalizeConfig({ peakMultiplier: 99 }).peakMultiplier, 10)
+  assert.equal(normalizeConfig({ peakMultiplier: 'x' }).peakMultiplier, 2)
+  assert.equal(normalizeConfig({ peakPricing: false }).peakPricing, false)
+  assert.equal(normalizeConfig({ peakPricing: 'yes' }).peakPricing, true, '类型不对就不覆盖默认值')
+  assert.equal(validateConfigPatch({ peakMultiplier: 1.5, peakPricing: false }).ok, true)
+  assert.equal(validateConfigPatch({ peakMultiplier: 0 }).ok, false)
+  assert.equal(validateConfigPatch({ peakMultiplier: 11 }).ok, false)
+  assert.equal(validateConfigPatch({ peakPricing: 'yes' }).ok, false)
+})
+
+test('峰时倍率把三档单价整体放大，倍率 1 原样返回', () => {
+  const base = pricesOf({})
+  assert.deepEqual(pricesAtMultiplier(base, 2), { cacheHit: 0.04, input: 2, output: 8 })
+  assert.equal(pricesAtMultiplier(base, 1), base, '倍率 1 不新建对象，金额与原价表完全一致')
+  // 0.02 × 1.7 不该留下浮点尾巴：单价要直接显示在页面上。
+  assert.equal(pricesAtMultiplier(base, 1.7).cacheHit, 0.034)
+  assert.equal(peakMultiplierOf({ peakMultiplier: 3 }), 3)
+  assert.equal(peakMultiplierOf({}), 2)
+  assert.equal(peakMultiplierOf({ peakMultiplier: 0 }), 1)
+  assert.equal(peakMultiplierOf({ peakMultiplier: 99 }), 10)
+})
+
+test('rawMoneyOf 与 moneyOf 同口径，但保留未取整值', () => {
+  const prices = { cacheHit: 0.02, input: 1, output: 4 }
+  const parts = { hit: 1234, input: 5678, output: 901 }
+  const raw = rawMoneyOf(parts, prices)
+  const rounded = moneyOf(parts, prices)
+  assert.ok(Math.abs(raw.total - rounded.total) < 1e-6)
+  // 逐档相加就是合计；峰谷混合时成本模型靠它按每条记录自己的单价累加再统一取整。
+  assert.equal(raw.total, raw.cacheHit + raw.input + raw.output)
 })
 
 test('normalizeConfig 忽略未知键并回调 warn', () => {

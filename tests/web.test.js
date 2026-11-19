@@ -348,6 +348,179 @@ test('composition 成本带上 store 里的实测用量：没有折叠记录也�
   assert.ok(body.cost.totals.foldedTokens > 0)
 })
 
+test('composition 成本透出峰谷口径：按轮时间戳计价，缺服务时标回退', () => {
+  const HOUR = 3600 * 1000
+  const midnight = Date.UTC(2026, 10, 19, 16, 0, 0)
+  const messages = [
+    { id: 's1', role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system' } },
+    ...demoMessages,
+  ]
+  const events = [
+    { type: 'turn/start', seq: 1, time: midnight + 20 * 60 * 1000, data: { turn: 1 } },
+    { type: 'system/message', seq: 2, data: { message: { role: 'system', content: [{ type: 'text', text: 'system prompt' }] } } },
+    { type: 'user/message', seq: 3, data: { role: 'user', content: [{ type: 'text', text: '问题' }] } },
+    { type: 'step/start', seq: 4, data: { turn: 1 } },
+    { type: 'assistant/message', seq: 5, data: { message: { role: 'assistant', content: [{ type: 'text', text: '回复' }] } } },
+  ]
+  const peakNow = {
+    ok: true,
+    period: 'peak',
+    peak: true,
+    multiplier: 2,
+    timezone: 'Asia/Hong_Kong',
+    now: midnight + 20 * 60 * 1000,
+    nextSwitchAt: midnight + 8 * HOUR,
+    nextPeakAt: null,
+    nextOffPeakAt: null,
+  }
+  const peak = {
+    enabled: true,
+    available: true,
+    fallback: false,
+    multiplier: 2,
+    pricingAt: () => peakNow,
+    now: peakNow,
+  }
+  const baseOptions = {
+    resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', messages) : undefined),
+    makeStore: () => makeStore([]),
+    getConfig: () => ({}),
+    log: quietLog,
+    getSessionEvents: () => events,
+  }
+  const withPeak = fakeRes()
+  createCompositionHandler({ ...baseOptions, getPeak: () => peak })(fakeReq(compositionPath + '?session=s1'), withPeak)
+  const body = JSON.parse(withPeak.state.body)
+  assert.equal(body.cost.peak.available, true)
+  assert.equal(body.cost.peak.fallback, false)
+  assert.equal(body.cost.peak.active, true)
+  assert.equal(body.cost.peak.peak, true)
+  assert.equal(body.cost.peak.turns.peak, 1)
+  assert.ok(body.cost.peak.premium.folded > 0)
+  assert.ok(body.cost.totals.money.folded.total > 0)
+  // 没有服务：同一份历史按峰值倍率保守估算，并明确标成回退。
+  const fallbackRes = fakeRes()
+  createCompositionHandler({
+    ...baseOptions,
+    getPeak: () => ({ enabled: true, available: false, fallback: true, multiplier: 2, pricingAt: null, now: null }),
+  })(fakeReq(compositionPath + '?session=s1'), fallbackRes)
+  const fallbackBody = JSON.parse(fallbackRes.state.body)
+  assert.equal(fallbackBody.cost.peak.fallback, true)
+  assert.equal(fallbackBody.cost.peak.available, false)
+  assert.equal(fallbackBody.cost.peak.applied, true)
+  // 这一轮本来就在峰时：回退假设全峰，金额与按服务判定的一致，不会少算。
+  assert.ok(Math.abs(fallbackBody.cost.totals.foldedMoney - body.cost.totals.foldedMoney) < 1e-9)
+})
+
+test('composition 的峰谷字段随 cost 下发，客户端不直接摸服务', () => {
+  const handler = createCompositionHandler({
+    resolveSessionById: (id) => (id === 's2' ? fakeSession('s2', []) : undefined),
+    makeStore: () => makeStore([]),
+    getConfig: () => ({}),
+    log: quietLog,
+  })
+  const res = fakeRes()
+  handler(fakeReq(compositionPath + '?session=s2'), res)
+  const body = JSON.parse(res.state.body)
+  // 客户端只依赖宿主 HTTP：/fold-composition 的 cost 里带着完整峰谷口径。
+  assert.equal(typeof body.cost.peak, 'object')
+  assert.equal(body.cost.peak.enabled, true)
+  assert.equal(body.cost.peak.available, false)
+  assert.equal(typeof body.cost.peak.multiplier, 'number')
+})
+
+test('stats 账本的金额也按每条记录的时间戳分峰谷', () => {
+  const records = [
+    { kind: 'fold', id: 'f1', turn: 1, at: 1000, chars: 400, note: 'b'.repeat(40), items: [{ seq: 1, text: 'a'.repeat(400) }] },
+    { kind: 'recall', id: 'f1', turn: 2, at: 2000, chars: 40, tokens: 10 },
+    { kind: 'pin', id: 'P', turn: 1, at: 3000, text: 'cccc' },
+  ]
+  const base = createStatsHandler({
+    makeStore: () => makeStore(records),
+    getConfig: () => ({}),
+    log: quietLog,
+  })
+  const baseRes = fakeRes()
+  base(fakeReq('/fold-stats?session=s1'), baseRes)
+  const baseBody = JSON.parse(baseRes.state.body)
+  const fallback = createStatsHandler({
+    makeStore: () => makeStore(records),
+    getConfig: () => ({}),
+    log: quietLog,
+    getPeak: () => ({ enabled: true, available: false, fallback: true, multiplier: 2, pricingAt: null, now: null }),
+  })
+  const fallbackRes = fakeRes()
+  fallback(fakeReq('/fold-stats?session=s1'), fallbackRes)
+  const fallbackBody = JSON.parse(fallbackRes.state.body)
+  assert.equal(fallbackBody.pricing.peak.fallback, true)
+  assert.equal(fallbackBody.pricing.peak.applied, true)
+  assert.equal(fallbackBody.pricing.peak.turns.unknown, 3)
+  // 保守回退把三档单价整体乘 2：金额也应是原来的两倍。
+  assert.ok(Math.abs(fallbackBody.totals.savedMoney - Math.round(baseBody.totals.savedMoney * 2 * 1e6) / 1e6) < 1e-6)
+  assert.ok(Math.abs(fallbackBody.totals.recallMoney - Math.round(baseBody.totals.recallMoney * 2 * 1e6) / 1e6) < 1e-6)
+})
+
+test('registerStatsRoute 惰性从 ctx.get(fish.token) 取峰谷，缺服务时回退并只告警一次', () => {
+  const messages = [
+    { id: 's1', role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system' } },
+    ...demoMessages,
+  ]
+  const routesOf = (ctx, warnings) => {
+    const routes = []
+    ctx.webServer = { register(route) { routes.push(route); return () => {} } }
+    registerStatsRoute({
+      ctx,
+      log: Object.assign({}, quietLog, { warn(message) { warnings.push(message) } }),
+      makeStore: () => makeStore([]),
+      getConfig: () => ({}),
+      resolveSessionById: (id) => (id === 's1' ? fakeSession('s1', messages) : undefined),
+    })
+    return routes
+  }
+  const compositionOf = (routes) => routes.find((route) => route.path === compositionPath).handler
+
+  // 有服务：时段判定真的走了 ctx.get('fish.token')。
+  const withService = routesOf({
+    get(name) {
+      if (name !== 'fish.token') return null
+      return {
+        getPricing(at) {
+          return {
+            ok: true,
+            peak: true,
+            multiplier: 2,
+            timezone: 'Asia/Hong_Kong',
+            now: at,
+            nextSwitchAt: null,
+            nextPeakAt: null,
+            nextOffPeakAt: null,
+          }
+        },
+      }
+    },
+  }, [])
+  const served = fakeRes()
+  compositionOf(withService)(fakeReq(compositionPath + '?session=s1'), served)
+  const servedBody = JSON.parse(served.state.body)
+  assert.equal(servedBody.cost.peak.available, true)
+  assert.equal(servedBody.cost.peak.active, true)
+  assert.equal(servedBody.cost.peak.fallback, false)
+
+  // 没服务：按峰值倍率回退；账本是轮询的，同一条告警只写一次。
+  const warnings = []
+  const withoutService = routesOf({}, warnings)
+  for (let i = 0; i < 2; i += 1) {
+    const res = fakeRes()
+    compositionOf(withoutService)(fakeReq(compositionPath + '?session=s1'), res)
+    const body = JSON.parse(res.state.body)
+    assert.equal(body.cost.peak.available, false)
+    assert.equal(body.cost.peak.fallback, true)
+  }
+  assert.equal(warnings.length, 1, warnings.join('；'))
+  assert.ok(warnings[0].includes('未接入计价服务'), warnings[0])
+  assert.ok(warnings[0].includes('峰值倍率'), warnings[0])
+})
+
 test('composition 路由缺参数 400、找不到会话 404、空历史给空构成', () => {
   const handler = createCompositionHandler({
     resolveSessionById: (id) => (id === 's2' ? fakeSession('s2', []) : undefined),
@@ -717,6 +890,15 @@ test('config 路由 GET 返回字段表、当前值与文件路径', () => {
   const keys = body.fields.map((field) => field.key)
   assert.ok(keys.includes('recallIndexPreviewTokens'))
   assert.ok(keys.includes('systemPromptText'))
+  // 设置页按同一张字段表渲染：峰谷两项带中文名、默认值与范围。
+  const peakPricing = body.fields.find((field) => field.key === 'peakPricing')
+  const peakMultiplier = body.fields.find((field) => field.key === 'peakMultiplier')
+  assert.equal(peakPricing.label, '按峰谷计价')
+  assert.equal(peakPricing.default, true)
+  assert.equal(peakMultiplier.label, '峰值倍率')
+  assert.equal(peakMultiplier.default, 2)
+  assert.equal(peakMultiplier.min, 1)
+  assert.equal(peakMultiplier.max, 10)
 })
 
 test('config 路由 POST 走热更新，返回新配置', async () => {

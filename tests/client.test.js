@@ -579,6 +579,102 @@ test('成本参考：头部按 token 计，金额只作折算', () => {
   assert.ok(text.includes('"¥0.2"'))
 })
 
+test('成本面板透出峰谷口径：当前时段、倍率、溢价与回退说明', () => {
+  const { module } = loadClient()
+  const t = module.__test
+  assert.equal(t.peakLine({ enabled: false }), '按峰谷计价已关闭：全部按谷时单价')
+  // 服务拿不到时按峰值倍率保守估算，必须写明是回退。
+  const fallback = t.peakLine({ enabled: true, applied: true, fallback: true, multiplier: 2, premium: { folded: 0.001 } })
+  assert.ok(fallback.includes('未接入计价服务，按峰值倍率 ×2 估算'), fallback)
+  assert.ok(fallback.includes('保守'), fallback)
+  // 谷时：当前按原价，但峰时倍率与下次切换仍要能看到。
+  const off = t.peakLine({
+    enabled: true,
+    applied: true,
+    active: true,
+    fallback: false,
+    peak: false,
+    multiplier: 2,
+    timezone: 'Asia/Hong_Kong',
+    nextSwitchAt: 1795140000000,
+    reason: 'weekend',
+    calendar: { covered: false },
+    premium: { folded: 0.0012 },
+    turns: { peak: 0, offPeak: 1, unknown: 0 },
+  })
+  assert.ok(off.includes('当前谷时（周末）'), off)
+  assert.ok(off.includes('峰时 ×2'), off)
+  assert.ok(off.includes('转峰时'), off)
+  assert.ok(off.includes('峰时溢价 ¥0.0012'), off)
+  // 节假日历过期时要说清是按星期与钟点估的，不能让人以为节假日表还在生效。
+  assert.ok(off.includes('节假日历已过期'), off)
+  // 峰时：当前倍率生效，并给出溢价与「没有时段数据」的规模。
+  const on = t.peakLine({
+    enabled: true,
+    applied: true,
+    active: true,
+    fallback: false,
+    peak: true,
+    multiplier: 2,
+    premium: { folded: 0.01 },
+    turns: { peak: 1, offPeak: 0, unknown: 2 },
+  })
+  assert.ok(on.includes('当前峰时'), on)
+  assert.ok(on.includes('2 轮没有时段数据'), on)
+})
+
+test('成本面板用服务端的峰谷金额，不拿总 token 乘单一单价', () => {
+  const { module } = loadClient()
+  const section = module.__test.CostSection({
+    cost: {
+      prices: { cacheHit: 0.02, input: 1, output: 4 },
+      peak: {
+        enabled: true,
+        applied: true,
+        active: true,
+        fallback: false,
+        peak: true,
+        multiplier: 2,
+        premium: { folded: 0.005 },
+        turns: { peak: 1, offPeak: 0, unknown: 0 },
+      },
+      totals: {
+        foldedHitTokens: 1000,
+        foldedInputTokens: 1000,
+        unfoldedHitTokens: 2000,
+        unfoldedInputTokens: 1000,
+        outputTokens: 1000,
+        foldedTokens: 1000,
+        unfoldedTokens: 3000,
+        netSavedTokens: 2000,
+        savedRate: 0.5,
+        foldedMoney: 0.0064,
+        unfoldedMoney: 0.0068,
+        netSavedMoney: 0.0004,
+        money: {
+          folded: { cacheHit: 0.0004, input: 0.002, output: 0.004, total: 0.0064 },
+          unfolded: { cacheHit: 0.0008, input: 0.002, output: 0.004, total: 0.0068 },
+          actual: { cacheHit: 0, input: 0, output: 0, total: 0 },
+        },
+        actualTurns: 0,
+        latestMoney: 0,
+        turns: 1,
+        steps: 2,
+      },
+      turns: [],
+    },
+    pinTotals: {},
+  })
+  const text = JSON.stringify(section)
+  assert.ok(text.includes('当前峰时'), text.slice(0, 400))
+  assert.ok(text.includes('峰时溢价 ¥0.005'), text.slice(0, 400))
+  // 单价列标明是谷时价：峰时的行不是按这个数乘总量。
+  assert.ok(text.includes('谷时单价（¥ / M）'), text.slice(0, 900))
+  // 服务端金额优先：¥0.0064 不是 token 总量乘基础单价的 0.00502。
+  assert.ok(text.includes('¥0.0064'), text.slice(0, 1200))
+  assert.equal(text.includes('¥0.00502'), false)
+})
+
 test('账本头部只用 token 报收益，不出现人民币', () => {
   const { module } = loadClient()
   const kpis = module.__test.ledgerKpis({
