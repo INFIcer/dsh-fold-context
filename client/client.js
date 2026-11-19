@@ -241,6 +241,17 @@ window.__ModuleLoader__.load({
       compItem: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', lineHeight: '20px', minWidth: '0' },
       compCell: { fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: '44px' },
       compNote: { fontSize: '11px', opacity: 0.6, lineHeight: '18px' },
+      // 图表浮层要压在同页的卡片与坐标轴之上，又不能再撑开布局；深底白字在任何主题下都读得清。
+      compTip: {
+        position: 'absolute', zIndex: 5, pointerEvents: 'none',
+        fontSize: '11px', lineHeight: '16px', color: '#f5f7fa',
+        background: 'rgba(18,20,24,.92)', border: '1px solid rgba(255,255,255,.14)',
+        borderRadius: '6px', padding: '5px 8px',
+        boxShadow: '0 6px 18px rgba(0,0,0,.35)', whiteSpace: 'nowrap',
+        fontVariantNumeric: 'tabular-nums',
+      },
+      compTipTitle: { fontWeight: 600, marginBottom: '2px' },
+      compTipLine: { opacity: 0.85 },
       toggleOn: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.5)', background: 'rgba(128,128,128,.18)', color: 'inherit', cursor: 'pointer', fontWeight: 600 },
       toggleOff: { fontSize: '12px', padding: '3px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.28)', background: 'transparent', color: 'inherit', cursor: 'pointer', opacity: 0.65 },
     }
@@ -2291,11 +2302,125 @@ window.__ModuleLoader__.load({
       return [ref, state[0] > 0 ? state[0] : 720]
     }
 
+    var COMPOSITION_LABEL_FONT = 10
+    // 两个标签中心至少隔 32px：10px 的短标签本身只有 12~24px 宽，再窄就叠在一起了。
+    var COMPOSITION_LABEL_MIN_GAP = 32
+    var COMPOSITION_LABEL_MIN = 4
+    var COMPOSITION_LABEL_MAX = 8
+
+    // 只给横轴排位用：中日韩文字与全角符号按一个字号算，其余按 0.6 个字号。
+    // 宁可按宽了算，画出来才发现重叠就得再改一遍布局。
+    function compositionTextWidth(text, fontSize) {
+      var value = typeof text === 'string' ? text : String(text === null || text === undefined ? '' : text)
+      var size = fontSize > 0 ? fontSize : COMPOSITION_LABEL_FONT
+      var width = 0
+      for (var i = 0; i < value.length; i += 1) {
+        var code = value.charCodeAt(i)
+        var wide = (code >= 0x2e80 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff) ||
+          (code >= 0xff00 && code <= 0xffef) || (code >= 0x3000 && code <= 0x303f)
+        width += wide ? size : size * 0.6
+      }
+      return width
+    }
+
+    // 横轴用短标记（T12 / F3 / S2）；万一没有标签也用序号兜底，末尾块永远有字。
+    function compositionLabelOf(point, index) {
+      var label = point && typeof point.label === 'string' ? point.label : ''
+      if (label) return label
+      var ordinal = point && typeof point.ordinal === 'number' ? point.ordinal : index + 1
+      return 'T' + ordinal
+    }
+
+    function compositionEventOf(point) {
+      return /^[CFPS]/.test(point && typeof point.label === 'string' ? point.label : '')
+    }
+
+    // 悬停首行：系统提示写出版本含义，折叠/压缩/清理事件保持短标记，普通块回到「第 N 轮」。
+    function compositionPointTitle(point, index) {
+      var label = compositionLabelOf(point, index)
+      if (/^S/.test(label)) return '系统提示词版本 ' + label
+      if (/^[CFP]/.test(label)) return label
+      var turnMatch = /^T(\d+)$/.exec(label)
+      if (turnMatch) return '第 ' + turnMatch[1] + ' 轮'
+      if (point && typeof point.turn === 'number' && point.turn > 0) return '第 ' + point.turn + ' 轮'
+      if (point && typeof point.ordinal === 'number') return '第 ' + point.ordinal + ' 轮'
+      return '第 ' + (index + 1) + ' 块'
+    }
+
+    // 标签数量随绘图区宽度走：窄屏保底 4 个，宽屏最多 8 个，再多必然叠。
+    function compositionChartLabelTarget(plotWidth) {
+      if (!(plotWidth > 0)) return COMPOSITION_LABEL_MIN
+      var guess = Math.round(plotWidth / 90)
+      return Math.max(COMPOSITION_LABEL_MIN, Math.min(COMPOSITION_LABEL_MAX, guess))
+    }
+
+    // 标签的挑选顺序：末尾块必留 → 事件点按「离已选最远」铺开 → 普通轮次补到目标数。
+    // 每轮都取离已选标签最远的那一个，等价于把标签尽量均匀铺满横轴，事件再多也不会挤在左端；
+    // 碰撞用像素宽度判断，放不下的候选直接跳过，而不是先选好再靠渲染时重叠。
+    function compositionLabelPlan(points, plotWidth) {
+      var list = Array.isArray(points) ? points : []
+      var count = list.length
+      if (count === 0) return []
+      if (count === 1) return [0]
+      var step = (plotWidth > 0 ? plotWidth : 0) / (count - 1)
+      var target = Math.min(count, compositionChartLabelTarget(plotWidth))
+      var placed = [count - 1]
+      function xOf(index) {
+        return step * index
+      }
+      function fits(index) {
+        var x = xOf(index)
+        var ownWidth = compositionTextWidth(compositionLabelOf(list[index], index), COMPOSITION_LABEL_FONT)
+        for (var i = 0; i < placed.length; i += 1) {
+          var other = placed[i]
+          var otherWidth = compositionTextWidth(compositionLabelOf(list[other], other), COMPOSITION_LABEL_FONT)
+          var need = Math.max(COMPOSITION_LABEL_MIN_GAP, (ownWidth + otherWidth) / 2 + 6)
+          if (Math.abs(x - xOf(other)) < need) return false
+        }
+        return true
+      }
+      function placeFarthest(candidates, limit) {
+        var pending = candidates.slice()
+        while (pending.length > 0 && limit > 0) {
+          var best = -1
+          var bestGap = -1
+          for (var c = 0; c < pending.length; c += 1) {
+            if (!fits(pending[c])) continue
+            var gap = Infinity
+            for (var p = 0; p < placed.length; p += 1) {
+              gap = Math.min(gap, Math.abs(xOf(pending[c]) - xOf(placed[p])))
+            }
+            if (gap > bestGap) {
+              bestGap = gap
+              best = c
+            }
+          }
+          if (best < 0) return
+          placed.push(pending[best])
+          pending.splice(best, 1)
+          limit -= 1
+        }
+      }
+      var events = []
+      var turns = []
+      for (var i = 0; i < count - 1; i += 1) {
+        if (compositionEventOf(list[i])) events.push(i)
+        else turns.push(i)
+      }
+      // 事件优先，但给末尾块与普通轮次留出至少两个位置，否则一路事件会把横轴占满。
+      placeFarthest(events, Math.max(0, target - 2))
+      placeFarthest(turns, target - placed.length)
+      return placed.sort(function (a, b) { return a - b })
+    }
+
     function CompositionChart(props) {
       var points = Array.isArray(props.points) ? props.points : []
       var view = props.view === 'unfolded' ? 'unfolded' : 'folded'
       var mode = props.mode === 'step' ? 'step' : 'total'
       var measured = useChartWidth()
+      var hoverState = react.useState(null)
+      // 视角或口径一换，旧块坐标与旧数值都不再对应当前图：先清掉，浮层不会停在旧位置。
+      react.useEffect(function () { hoverState[1](null) }, [view, mode])
       var width = measured[1]
       var height = CHART_HEIGHT
       var padLeft = 46
@@ -2368,40 +2493,133 @@ window.__ModuleLoader__.load({
         strokeDasharray: '5 4',
         opacity: 0.7,
       })
-      // 每个块一个透明热区，鼠标停上去看这块的折叠后 / 不折叠 token 数。
-      var hover = []
-      var sliceWidth = plotWidth / (count - 1)
-      for (var hi = 0; hi < count; hi += 1) {
-        var point = points[hi]
-        var tokenTotals = point.tokensTotals || {}
-        var fTokens = typeof tokenTotals.folded === 'number' ? tokenTotals.folded : 0
-        var uTokens = typeof tokenTotals.unfolded === 'number' ? tokenTotals.unfolded : 0
-        hover.push(h('rect', {
-          key: 'h' + hi,
-          x: xAt(hi) - sliceWidth / 2,
-          y: padTop,
-          width: sliceWidth,
-          height: plotHeight,
-          fill: 'transparent',
-        }, h('title', {}, (point.label || '第 ' + point.ordinal + ' 块') + ' · 折叠后 ' + formatTokens(fTokens) + ' token · 不折叠 ' + formatTokens(uTokens) + ' token')))
-      }
+      // 标签多到挤成一排就失去意义：按像素宽度只留几块，末尾块与事件点优先。
+      var labelIndexes = compositionLabelPlan(points, plotWidth)
       var labels = []
-      var every = Math.max(1, Math.ceil(count / 8))
-      for (var li = 0; li < count; li += 1) {
-        var label = points[li].label || ''
-        if (!label) continue
-        // 折叠/压缩/系统事件点无论落在哪一格都标出来：趋势上的台阶要能对上事件。
-        var isEvent = /^[CFPS]/.test(label)
-        if (!isEvent && li % every !== 0 && li !== count - 1) continue
-        labels.push(h('text', { key: 'l' + li, x: xAt(li), y: height - 7, fontSize: 10, fill: 'currentColor', opacity: 0.55, textAnchor: 'middle' }, label))
+      for (var pi = 0; pi < labelIndexes.length; pi += 1) {
+        var labelIndex = labelIndexes[pi]
+        var labelText = compositionLabelOf(points[labelIndex], labelIndex)
+        labels.push(h('text', {
+          key: 'l' + labelIndex,
+          x: xAt(labelIndex),
+          y: height - 7,
+          'data-x': xAt(labelIndex).toFixed(1),
+          'data-label': labelText,
+          'data-index': labelIndex,
+          fontSize: COMPOSITION_LABEL_FONT,
+          fill: 'currentColor',
+          opacity: 0.55,
+          // 末尾标签贴右缘，居中对齐会有一半落在画布外。
+          textAnchor: labelIndex === count - 1 ? 'end' : 'middle',
+        }, labelText))
       }
-      return h('div', { ref: measured[0], style: { width: '100%' } },
+      // 悬停不走 SVG 原生 <title>：原生提示只有延迟出现的一行，读不到两个视角的数。
+      // 这里用透明覆盖层记住最近一块，参考线与浮层都从同一份状态画出来，不会一处有一处没有。
+      var hoverMarks = []
+      var tooltip = null
+      var hover = hoverState[0]
+      // 切换视角/口径后的第一帧可能还留着上一张图的悬停快照，先按当前 view/mode 挡掉。
+      var hoverStale = !hover || hover.view !== view || hover.mode !== mode
+      var hoverIndex = !hoverStale && typeof hover.index === 'number' ? hover.index : -1
+      if (hoverIndex >= 0 && hoverIndex < count) {
+        var hoverX = xAt(hoverIndex)
+        var foldedHere = compositionTotal(points[hoverIndex], 'folded', mode)
+        var unfoldedHere = compositionTotal(points[hoverIndex], 'unfolded', mode)
+        var currentHere = view === 'folded' ? foldedHere : unfoldedHere
+        var otherHere = view === 'folded' ? unfoldedHere : foldedHere
+        hoverMarks.push(h('line', {
+          key: 'hoverLine',
+          x1: hoverX, y1: padTop, x2: hoverX, y2: padTop + plotHeight,
+          stroke: 'currentColor', strokeWidth: 1, strokeDasharray: '3 3', opacity: 0.5,
+        }))
+        // 实心点落在面积那条线（当前视角），空心点落在对照虚线上；数值相同时两点重合，读起来也一致。
+        hoverMarks.push(h('circle', {
+          key: 'hoverSolid',
+          cx: hoverX, cy: yAt(currentHere), r: 3,
+          fill: 'currentColor', stroke: 'none', 'data-series': view,
+        }))
+        hoverMarks.push(h('circle', {
+          key: 'hoverHollow',
+          cx: hoverX, cy: yAt(otherHere), r: 3,
+          fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, 'data-series': otherView,
+        }))
+        var lines = [
+          compositionPointTitle(points[hoverIndex], hoverIndex),
+          '折叠后 ' + formatTokens(foldedHere) + ' token',
+          '不折叠 ' + formatTokens(unfoldedHere) + ' token',
+        ]
+        if (unfoldedHere > foldedHere) {
+          lines.push('省 ' + formatTokens(unfoldedHere - foldedHere) + ' token（' + percent(1 - foldedHere / unfoldedHere) + '）')
+        }
+        var tipWidth = 0
+        for (var ti = 0; ti < lines.length; ti += 1) {
+          tipWidth = Math.max(tipWidth, compositionTextWidth(lines[ti], 11))
+        }
+        tipWidth = Math.min(width, Math.ceil(tipWidth) + 16)
+        var tipHeight = lines.length * 16 + 10
+        // 靠近右/上边缘就翻到指针另一侧，再夹进容器：浮层不能被裁掉，也不能越过图本身。
+        var tipLeft = hover.x + 12
+        if (tipLeft + tipWidth > width) tipLeft = hover.x - 12 - tipWidth
+        tipLeft = Math.max(0, Math.min(width - tipWidth, tipLeft))
+        var tipTop = hover.y - tipHeight - 10
+        if (tipTop < 0) tipTop = hover.y + 14
+        tipTop = Math.max(0, Math.min(height - tipHeight, tipTop))
+        tooltip = h('div', {
+          key: 'tip',
+          'data-chart-tip': '',
+          style: Object.assign({}, C.compTip, {
+            left: tipLeft + 'px',
+            top: tipTop + 'px',
+            width: tipWidth + 'px',
+            boxSizing: 'border-box',
+          }),
+        }, lines.map(function (line, lineIndex) {
+          return h('div', { key: 'tl' + lineIndex, style: lineIndex === 0 ? C.compTipTitle : C.compTipLine }, line)
+        }))
+      }
+      function onHoverMove(event) {
+        var node = event && event.currentTarget
+        var rect = node && typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null
+        if (!rect) return
+        var localX = event.clientX - rect.left
+        var localY = event.clientY - rect.top
+        var slice = plotWidth / (count - 1)
+        var index = slice > 0 ? Math.round(localX / slice) : 0
+        if (!isFinite(index)) index = 0
+        index = Math.max(0, Math.min(count - 1, index))
+        hoverState[1]({
+          index: index,
+          view: view,
+          mode: mode,
+          // 浮层跟指针走，参考线归到最近的块中心：读的是这一块的数，不按鼠标位置猜。
+          x: padLeft + Math.max(0, Math.min(plotWidth, localX)),
+          y: padTop + Math.max(0, Math.min(plotHeight, localY)),
+        })
+      }
+      var overlay = h('div', {
+        key: 'overlay',
+        'data-chart-overlay': '',
+        style: {
+          position: 'absolute',
+          left: padLeft + 'px',
+          top: padTop + 'px',
+          width: plotWidth + 'px',
+          height: plotHeight + 'px',
+          cursor: 'crosshair',
+          background: 'transparent',
+        },
+        onMouseMove: onHoverMove,
+        onMouseLeave: function () { hoverState[1](null) },
+      })
+      return h('div', { ref: measured[0], style: { width: '100%', position: 'relative' } },
         h('svg', {
           width: width,
           height: height,
           viewBox: '0 0 ' + width + ' ' + height,
           style: { width: '100%', height: height + 'px', display: 'block' },
-        }, grid.concat(layers, [otherLine], hover, labels))
+        }, grid.concat(layers, [otherLine], hoverMarks, labels)),
+        overlay,
+        tooltip
       )
     }
 
@@ -2516,7 +2734,7 @@ window.__ModuleLoader__.load({
             )
           ),
           h(CompositionChart, { points: points, view: view, mode: mode }),
-          h('div', { style: Object.assign({}, C.compNote, { marginTop: '4px' }) }, '横轴每格是一块历史：T = 轮次，S = 系统提示词版本；面积按当前视角累加，两条线的差就是折叠省下的量。')
+          h('div', { style: Object.assign({}, C.compNote, { marginTop: '4px' }) }, '横轴每格是一块历史：T = 轮次，S = 系统提示词版本；面积按当前视角累加，两条线的差就是折叠省下的量。鼠标停上去看这一块的轮次与两个视角的具体 token。')
         )
       )
     }
@@ -3287,6 +3505,10 @@ window.__ModuleLoader__.load({
       CompositionPanel: CompositionPanel,
       CompositionChart: CompositionChart,
       otherViewLabel: otherViewLabel,
+      compositionLabelPlan: compositionLabelPlan,
+      compositionPointTitle: compositionPointTitle,
+      compositionTextWidth: compositionTextWidth,
+      COMPOSITION_LABEL_MIN_GAP: COMPOSITION_LABEL_MIN_GAP,
       TurnCard: TurnCard,
       entryKindOf: entryKindOf,
       costDriftNote: costDriftNote,

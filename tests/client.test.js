@@ -20,6 +20,8 @@ function loadClient(options = {}) {
   }
   // states：按顺序给每个 useState 喂初值，用来把一页真实数据摊开渲染。
   let cursor = 0
+  // mount：交互测试时按 hook 顺序维护状态，setter 触发一次同步重渲染。
+  let mountCtx = null
   const react = {
     createElement(type, props) {
       const children = Array.prototype.slice.call(arguments, 2)
@@ -27,6 +29,17 @@ function loadClient(options = {}) {
     },
     // open 让展开态可测：收起态是默认值，展开态才看得到 details 的正文。
     useState(value) {
+      if (mountCtx) {
+        const handle = mountCtx
+        const index = handle.cursor
+        handle.cursor += 1
+        if (!(index in handle.slots)) handle.slots[index] = value
+        return [handle.slots[index], function (next) {
+          const previous = handle.slots[index]
+          handle.slots[index] = typeof next === 'function' ? next(previous) : next
+          handle.rerender()
+        }]
+      }
       if (options.states) {
         const next = options.states[cursor]
         cursor += 1
@@ -45,7 +58,28 @@ function loadClient(options = {}) {
     assert.equal(name, 'react')
     return react
   })
-  return { definition, module }
+  // 只给交互测试用：props 固定，state setter 之后同步重跑组件，拿最新的元素树断言。
+  function mount(name, props) {
+    const component = module.__test && module.__test[name]
+    assert.equal(typeof component, 'function', '缺少组件：' + name)
+    const handle = { slots: [], cursor: 0, tree: null, rerender: null }
+    handle.rerender = function () {
+      handle.cursor = 0
+      mountCtx = handle
+      try {
+        handle.tree = component(props)
+      } finally {
+        mountCtx = null
+      }
+    }
+    handle.rerender()
+    handle.setProps = function (next) {
+      props = next
+      handle.rerender()
+    }
+    return handle
+  }
+  return { definition, module, mount }
 }
 
 function fakeCtx() {
@@ -192,6 +226,40 @@ function demoComposition() {
   }
 }
 
+// 假 createElement 不摊平数组子节点，统一摊平后再按组件/属性找节点。
+function flattenNodes(nodes, out = []) {
+  for (const node of nodes || []) {
+    if (Array.isArray(node)) flattenNodes(node, out)
+    else if (node && typeof node === 'object') out.push(node)
+  }
+  return out
+}
+
+function collectNodes(node, out = []) {
+  if (!node || typeof node !== 'object') return out
+  out.push(node)
+  for (const child of flattenNodes(node.children)) collectNodes(child, out)
+  return out
+}
+
+function findNode(node, predicate) {
+  return collectNodes(node).find(predicate) || null
+}
+
+// 标签稀疏化与悬停用的最小点集：值不影响标签排位，但悬停要能算出两个视角的数。
+function chartPoints(labels) {
+  return labels.map(function (label, index) {
+    return {
+      ordinal: index + 1,
+      kind: /^[CFPS]/.test(label) ? 'event' : 'turn',
+      label: label,
+      tokens: { folded: { user: 100 + index }, unfolded: { user: 200 + index } },
+      cumulativeTokens: { folded: { user: 100 + index }, unfolded: { user: 200 + index } },
+      tokensTotals: { folded: 100 + index, unfolded: 200 + index },
+    }
+  })
+}
+
 test('构成面板、图表与重要消息行能渲染（冒烟）', () => {
   const { module } = loadClient()
   const components = module.__test
@@ -249,6 +317,104 @@ test('构成面板、图表与重要消息行能渲染（冒烟）', () => {
   // 不折叠条上有一道竖线，标出折叠后保留到的位置
   assert.equal(unfoldedTrack.children.length, 2)
   assert.equal(unfoldedTrack.children[1].props.style.left, foldedWidth.toFixed(2) + '%')
+})
+
+test('趋势图横轴标签按像素稀疏化：最多 8 个、互不重叠，末块必有标', () => {
+  const { module } = loadClient()
+  const labels = []
+  for (let i = 0; i < 80; i += 1) {
+    // 事件点占多数，模拟真实会话里折叠/压缩密集的极端情况。
+    if (i === 79) labels.push('T80')
+    else if (i % 10 === 0) labels.push('F' + (i / 10 + 1))
+    else labels.push('T' + (i + 1))
+  }
+  const points = chartPoints(labels)
+  const chart = module.__test.CompositionChart({ points, view: 'folded', mode: 'total' })
+  const nodes = collectNodes(chart)
+  const rendered = nodes.filter(function (node) {
+    return node && node.type === 'text' && node.props && node.props['data-label'] !== undefined
+  })
+  assert.ok(rendered.length >= 4 && rendered.length <= 8, '标签数应落在 4~8：' + rendered.length)
+  const xs = rendered.map(function (node) { return parseFloat(node.props['data-x']) }).sort(function (a, b) { return a - b })
+  for (let i = 1; i < xs.length; i += 1) {
+    assert.ok(xs[i] - xs[i - 1] >= module.__test.COMPOSITION_LABEL_MIN_GAP, '相邻标签不能重叠：' + xs[i - 1] + ' / ' + xs[i])
+  }
+  assert.ok(rendered.some(function (node) { return node.props['data-label'] === 'T80' }), '最后一个块必须有标签')
+  // 事件优先但不能独占：普通轮次也要有标签可读。
+  assert.ok(rendered.some(function (node) { return !/^[CFPS]/.test(String(node.props['data-label'])) }), '普通轮次也要有标签')
+  // 宽度决定目标数量：窄屏保底 4，宽屏最多 8。
+  assert.equal(module.__test.compositionLabelPlan(points, 260).length, 4)
+  assert.equal(module.__test.compositionLabelPlan(points, 900).length, 8)
+  // 末块与紧邻事件冲突时，事件让位给末尾块。
+  const dense = chartPoints(['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'F9', 'T10'])
+  const densePlan = module.__test.compositionLabelPlan(dense, 120)
+  assert.ok(densePlan.includes(9), '末块必须在')
+  assert.equal(densePlan.includes(8), false, '与末块太近的事件标签应让位')
+})
+
+test('趋势图悬停浮层同时给出折叠后与不折叠的 token，移出即消失', () => {
+  const { module, mount } = loadClient()
+  const composition = demoComposition()
+  const chart = mount('CompositionChart', { points: composition.points, view: 'folded', mode: 'step' })
+  const overlayOf = function (tree) {
+    return findNode(tree, function (node) { return node.props && node.props['data-chart-overlay'] !== undefined })
+  }
+  const rect = { left: 0, top: 0, width: 666, height: 102 }
+  const at = function (x, y) {
+    return {
+      clientX: x,
+      clientY: y === undefined ? 40 : y,
+      currentTarget: { getBoundingClientRect: function () { return rect } },
+    }
+  }
+
+  let overlay = overlayOf(chart.tree)
+  assert.ok(overlay, '绘图区要有透明覆盖层')
+  // 原先的 SVG <title> 提示要彻底退场，不能两套浮层叠在一起。
+  assert.equal(findNode(chart.tree, function (node) { return node.type === 'title' }), null)
+
+  overlay.props.onMouseMove(at(46))
+  let text = JSON.stringify(chart.tree)
+  assert.ok(text.includes('第 1 轮'), text.slice(0, 600))
+  assert.ok(text.includes('折叠后 37.4k token'), '折叠后的数要在浮层里')
+  assert.ok(text.includes('不折叠 435.8k token'), '不折叠的数也要在浮层里')
+  assert.ok(text.includes('省 '), '有差额时给第四行')
+  assert.equal(text.includes('NaN'), false)
+  // 竖线 + 两个点：实心点画当前视角，空心点画另一视角。
+  assert.ok(findNode(chart.tree, function (node) { return node.type === 'line' && node.props.strokeDasharray === '3 3' }))
+  assert.ok(findNode(chart.tree, function (node) {
+    return node.type === 'circle' && node.props['data-series'] === 'folded' && node.props.fill === 'currentColor'
+  }))
+  assert.ok(findNode(chart.tree, function (node) {
+    return node.type === 'circle' && node.props['data-series'] === 'unfolded' && node.props.fill === 'none'
+  }))
+
+  // 坐标越界夹到首尾块，不能出现负索引或 undefined。
+  overlay = overlayOf(chart.tree)
+  overlay.props.onMouseMove(at(-500, -80))
+  text = JSON.stringify(chart.tree)
+  assert.ok(text.includes('第 1 轮'))
+  overlay = overlayOf(chart.tree)
+  overlay.props.onMouseMove(at(9999, 9999))
+  text = JSON.stringify(chart.tree)
+  assert.ok(text.includes('第 2 轮'))
+  assert.equal(text.includes('undefined'), false)
+
+  // 移出即消失。
+  overlay = overlayOf(chart.tree)
+  overlay.props.onMouseLeave({})
+  text = JSON.stringify(chart.tree)
+  assert.equal(text.includes('data-chart-tip'), false)
+  assert.equal(text.includes('不折叠 435.8k token'), false)
+
+  // 切到另一视角后，旧快照即使还在 state 里也不能显示出来。
+  overlay = overlayOf(chart.tree)
+  overlay.props.onMouseMove(at(46))
+  assert.ok(JSON.stringify(chart.tree).includes('data-chart-tip'))
+  chart.setProps({ points: composition.points, view: 'unfolded', mode: 'step' })
+  text = JSON.stringify(chart.tree)
+  assert.equal(text.includes('data-chart-tip'), false, '切换视角后不能残留旧浮层')
+  assert.equal(text.includes('折叠后 37.4k token'), false)
 })
 
 test('模型视角：近期重要与长期重要的卡片分色，旧字符串标签仍能渲染', () => {
